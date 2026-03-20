@@ -69,7 +69,8 @@ VEL_PARAM_LOSS_WEIGHTS = {
 NUM_WORKERS = 4
 VAL_SEQS = ["2928", "2933", "2935_s"]  # Hold-out validation sequences
 TRAIN_VAL_SAME_SEQS = True  # Convergence test mode: train and val use all sequences
-CONVERGENCE_SEQ_IDS = ["2920", "2921", "2922", "2923", "2924"]  # Empty list -> use all discovered
+# CONVERGENCE_SEQ_IDS = ["2920", "2921", "2922", "2923", "2924"]  # Empty list -> use all discovered
+CONVERGENCE_SEQ_IDS = []  # Empty list -> use all discovered
 
 # ── Device ─────────────────────────────────────────────────────────────────────
 DEVICE = "cuda:0"

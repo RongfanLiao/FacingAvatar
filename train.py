@@ -186,10 +186,9 @@ def train():
         dt = time.time() - t0
 
         # Validation
-        val_metrics = evaluate(model, val_loader, DEVICE)
+        if epoch % 10 == 0:
+            val_metrics = evaluate(model, val_loader, DEVICE)
 
-        # Logging
-        if epoch % 10 == 0 or epoch <= 5:
             print(
                 f"Epoch {epoch:4d}/{NUM_EPOCHS} | "
                 f"lr={lr:.2e} | "
@@ -199,18 +198,18 @@ def train():
                 f"{dt:.1f}s"
             )
 
-        # Save best model
-        if val_metrics["loss_total"] < best_val_loss:
-            best_val_loss = val_metrics["loss_total"]
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": best_val_loss,
-                },
-                os.path.join(CKPT_DIR, "best_model.pt"),
-            )
+            # Save best model
+            if val_metrics["loss_total"] < best_val_loss:
+                best_val_loss = val_metrics["loss_total"]
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_loss": best_val_loss,
+                    },
+                    os.path.join(CKPT_DIR, "best_model.pt"),
+                )
 
         # Save periodic checkpoint
         if epoch % 100 == 0:
