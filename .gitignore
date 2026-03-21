@@ -5,3 +5,4 @@ output
 *.pt
 *.pyc
 LookingFace
+slurm-*.out
