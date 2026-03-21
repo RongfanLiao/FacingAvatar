@@ -22,8 +22,6 @@ from config import (
 from model import AudioVisualFLAMEModel
 from dataset import build_dataloaders
 
-os.makedirs(CKPT_DIR, exist_ok=True)
-
 # ── FLAME param slices (order must match dataset.py FLAME_KEYS) ──────────────
 _o1 = FLAME_EXPR_DIM
 _o2 = _o1 + FLAME_JAW_DIM
@@ -131,6 +129,7 @@ def evaluate(model: nn.Module, loader, device: str) -> dict[str, float]:
 
 
 def train():
+    os.makedirs(CKPT_DIR, exist_ok=True)
     print("Building dataloaders...")
     train_loader, val_loader = build_dataloaders()
 

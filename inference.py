@@ -15,11 +15,12 @@ import torch
 from scipy.ndimage import uniform_filter1d
 
 from config import (
-    AUDIO_EMB_DIR, VIDEO_EMB_DIR, VIDEO_LABELS_DIR,
+    AUDIO_EMB_DIR, VIDEO_EMB_DIR,
     WHISPER_MAX_FRAMES, WHISPER_CHUNK_SEC, CKPT_DIR, DEVICE,
 )
 from model import AudioVisualFLAMEModel
 from dataset import _get_audio_duration, _interpolate_features, FLAME_KEYS
+from manifest import load_manifest
 
 
 def predict(seq_id: str, checkpoint: str, n_frames: int | None = None) -> dict[str, np.ndarray]:
@@ -98,8 +99,10 @@ def main():
     args = parser.parse_args()
 
     # Load label npz for static keys and frame count
-    label_dir = os.path.join(VIDEO_LABELS_DIR, f"{args.seq_id}_right")
-    label_npz = np.load(os.path.join(label_dir, "flame_param.npz"))
+    manifest = load_manifest()
+    entry = manifest[args.seq_id]
+    label_npz = np.load(entry["flame_npz"])
+    label_dir = os.path.dirname(entry["flame_npz"])
 
     # Use label frame count if not overridden, so all params stay aligned
     n_frames = args.n_frames or label_npz["expr"].shape[0]

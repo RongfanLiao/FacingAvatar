@@ -4,8 +4,10 @@ import os
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOOKINGFACE_DIR = os.path.join(BASE_DIR, "LookingFace")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 AUDIO_DIR = os.path.join(DATA_DIR, "audio")
+VIDEO_DIR = os.path.join(DATA_DIR, "video")
 AUDIO_EMB_DIR = os.path.join(DATA_DIR, "audio_embeddings")
 VIDEO_EMB_DIR = os.path.join(DATA_DIR, "video_embeddings")
 VIDEO_LABELS_DIR = os.path.join(DATA_DIR, "video_labels")
@@ -42,8 +44,8 @@ DROPOUT = 0.1
 LR = 2e-4
 WEIGHT_DECAY = 1e-5
 BETAS = (0.9, 0.99)
-BATCH_SIZE = 4
-NUM_EPOCHS = 500
+BATCH_SIZE = 128
+NUM_EPOCHS = 800
 WARMUP_STEPS = 500
 VEL_LOSS_WEIGHT = 0.5    # Velocity regularization weight
 
@@ -67,8 +69,9 @@ VEL_PARAM_LOSS_WEIGHTS = {
 }
 
 NUM_WORKERS = 4
-VAL_SEQS = ["2928", "2933", "2935_s"]  # Hold-out validation sequences
-TRAIN_VAL_SAME_SEQS = True  # Convergence test mode: train and val use all sequences
+TRAIN_RATIO = 0.7            # 70% train, 30% validation
+SPLIT_SEED = 42              # Reproducible random split
+TRAIN_VAL_SAME_SEQS = False  # Set True for convergence test (train == val)
 # CONVERGENCE_SEQ_IDS = ["2920", "2921", "2922", "2923", "2924"]  # Empty list -> use all discovered
 CONVERGENCE_SEQ_IDS = []  # Empty list -> use all discovered
 
