@@ -4,18 +4,26 @@ import os
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOOKINGFACE_DIR = os.path.join(BASE_DIR, "LookingFace")
+LOOKINGFACE_DIR = os.path.join(BASE_DIR, "data", "LookingFace")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 AUDIO_DIR = os.path.join(DATA_DIR, "audio")
 VIDEO_DIR = os.path.join(DATA_DIR, "video")
 AUDIO_EMB_DIR = os.path.join(DATA_DIR, "audio_embeddings")
 VIDEO_EMB_DIR = os.path.join(DATA_DIR, "video_embeddings")
 VIDEO_LABELS_DIR = os.path.join(DATA_DIR, "video_labels")
+WAV2VEC_EMB_DIR = os.path.join(DATA_DIR, "wav2vec_embeddings")
+DOCUMENTARY_DIR = os.path.join(DATA_DIR, "documentary")
+LOOKINGFACE_SPLITS_DIR = os.path.join(LOOKINGFACE_DIR, "dataset_splits")
 CKPT_DIR = os.path.join(BASE_DIR, "checkpoints")
+
+# ── Video specs ──────────────────────────────────────────────────────────────
+VIDEO_FPS = 25             # Documentary video frame rate
+VIDEO_CANVAS_SIZE = 512    # Fit frames into NxN canvas by longer side
 
 # ── Input dimensions ──────────────────────────────────────────────────────────
 WHISPER_DIM = 1280       # Whisper-Large-v3 encoder hidden size
 QWEN_DIM = 3584          # Qwen2.5-VL-7B hidden size
+WAV2VEC_DIM = 768        # wav2vec2-base-960h hidden size
 WHISPER_MAX_FRAMES = 1500  # Whisper always outputs 1500 frames (30s chunks)
 WHISPER_CHUNK_SEC = 30.0   # Whisper processes 30-second chunks
 AUDIO_SR = 16000           # Audio sample rate
