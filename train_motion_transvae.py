@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predefined_splits_dir", type=str, default=None,
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
     parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
+    parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     return parser.parse_args()
 
 
@@ -88,6 +89,10 @@ def make_loader(
 def main() -> None:
     args = parse_args()
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    eval_label = "val"
+    last_epoch = 0
+    last_checkpoint_metrics: dict[str, float] = {}
+    validation_ran = False
 
     if args.documentary:
         manifest = load_documentary_manifest()
@@ -101,8 +106,13 @@ def main() -> None:
             require_wav2vec_audio=True,
         )
         train_seqs = splits.get("train", [])
-        val_seqs = splits.get("test", splits.get("valid", []))
-        print(f"Predefined splits: train={len(train_seqs)}, eval={len(val_seqs)}")
+        if "test" in splits:
+            eval_label = "test"
+            val_seqs = splits["test"]
+        else:
+            eval_label = "valid"
+            val_seqs = splits.get("valid", [])
+        print(f"Predefined splits: train={len(train_seqs)}, {eval_label}={len(val_seqs)}")
     else:
         train_seqs, val_seqs = build_benchmark_split(
             split_path=args.split_path,
@@ -148,7 +158,19 @@ def main() -> None:
     if not args.eval_only:
         best_val = float("inf")
         for epoch in range(1, args.epochs + 1):
-            train_metrics = train_motion_transvae(model, train_loader, optimizer, criterion, device=device, div_p=args.div_p, scaler=scaler)
+            last_epoch = epoch
+            train_metrics = train_motion_transvae(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                device=device,
+                div_p=args.div_p,
+                scaler=scaler,
+                epoch=epoch,
+                num_epochs=args.epochs,
+                log_interval=args.log_interval,
+            )
             print(
                 f"Epoch {epoch:4d}/{args.epochs} | "
                 f"train_total={train_metrics['loss_total_with_div']:.5f} | "
@@ -157,17 +179,38 @@ def main() -> None:
             )
 
             if epoch % args.val_interval == 0:
-                val_metrics = validate_motion_transvae(model, val_loader, criterion, device=device, use_amp=use_amp)
+                validation_ran = True
+                val_metrics = validate_motion_transvae(
+                    model,
+                    val_loader,
+                    criterion,
+                    device=device,
+                    use_amp=use_amp,
+                    epoch=epoch,
+                    num_epochs=args.epochs,
+                    eval_label=eval_label,
+                    log_interval=args.log_interval,
+                )
+                last_checkpoint_metrics = val_metrics
                 print(
-                    f"  val_total={val_metrics['loss_total']:.5f} | "
-                    f"val_rec={val_metrics['loss_rec']:.5f} | "
-                    f"val_kld={val_metrics['loss_kld']:.5f}"
+                    f"  {eval_label}_total={val_metrics['loss_total']:.5f} | "
+                    f"{eval_label}_rec={val_metrics['loss_rec']:.5f} | "
+                    f"{eval_label}_kld={val_metrics['loss_kld']:.5f}"
                 )
                 last_path = os.path.join(args.checkpoint_dir, "last.pt")
                 save_checkpoint(last_path, model, optimizer, epoch, val_metrics)
                 if val_metrics["loss_total"] < best_val:
                     best_val = val_metrics["loss_total"]
                     save_checkpoint(best_path, model, optimizer, epoch, val_metrics)
+
+        final_path = os.path.join(args.checkpoint_dir, "final.pt")
+        save_checkpoint(final_path, model, optimizer, last_epoch, last_checkpoint_metrics)
+        print(f"Final checkpoint saved to: {final_path}")
+        if not validation_ran:
+            print(
+                "Validation did not run during training, so best.pt/last.pt were not written. "
+                "Use --val_interval <= --epochs if you want validation checkpoints."
+            )
 
     if os.path.exists(best_path):
         try:
@@ -176,14 +219,28 @@ def main() -> None:
             checkpoint = torch.load(best_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
 
-    metric_results = evaluate_motion_metrics(model, val_loader, device=device, target_variant=args.target_variant, use_amp=use_amp)
+    metric_results = evaluate_motion_metrics(
+        model,
+        val_loader,
+        device=device,
+        target_variant=args.target_variant,
+        use_amp=use_amp,
+        eval_label=eval_label,
+        log_interval=args.log_interval,
+    )
     metric_results["target_variant"] = args.target_variant
+    metric_results["evaluation_split"] = eval_label
+    metric_results.update({
+        f"{eval_label}_{key}": value
+        for key, value in list(metric_results.items())
+        if key not in {"target_variant", "evaluation_split"}
+    })
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     with open(metric_path, "w") as f:
         json.dump(metric_results, f, indent=2)
 
-    print("Final validation metrics:")
+    print(f"Final {eval_label} metrics:")
     for key, value in metric_results.items():
         if isinstance(value, (int, float)):
             print(f"  {key}={value:.6f}")

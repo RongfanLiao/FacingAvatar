@@ -24,6 +24,58 @@ The shape vector and canonical FLAME parameters are not predicted. During infere
 
 ## Quick start
 
+### Train the current motion TransVAE on LookingFace
+
+The current recommended training entrypoint for LookingFace is `train_motion_transvae.py`.
+
+This workflow:
+
+- uses raw left video frames plus wav2vec audio features
+- trains on `data/LookingFace/dataset_splits/train.json`
+- evaluates on `data/LookingFace/dataset_splits/test.json`
+- writes checkpoints and final metrics to a dedicated checkpoint directory
+
+Recommended environment:
+
+```bash
+conda activate avatar
+```
+
+If your network cannot reach Hugging Face directly, set a mirror endpoint:
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+```
+
+Rebuild the manifest after any dataset changes:
+
+```bash
+python manifest.py --rebuild
+```
+
+Precompute wav2vec features for LookingFace if `data/wav2vec_embeddings` is missing or incomplete:
+
+```bash
+python scripts/preprocess_lookingface.py --skip_existing --device cuda:0
+```
+
+Start training on the predefined train split and evaluate on the predefined test split:
+
+```bash
+python train_motion_transvae.py \
+  --predefined_splits_dir data/LookingFace/dataset_splits \
+  --epochs 100 \
+  --lr 1e-5 \
+  --checkpoint_dir checkpoints/motion_transvae_lookingface_predefined
+```
+
+Useful notes:
+
+- current defaults are `--epochs 100`, `--lr 1e-5`, and `--batch_size 2`
+- `train_motion_transvae.py` labels predefined evaluation as `test` in logs and saved metrics when `test.json` is present
+- the script only uses samples that have a valid manifest entry, right-side FLAME target, right MP4, and wav2vec feature file
+- final metrics are written to `checkpoints/motion_transvae_lookingface_predefined/metrics.json`
+
 ### Use prepared embeddings and labels
 
 If `data/audio_embeddings`, `data/video_embeddings`, and `data/video_labels` are already populated:
@@ -86,10 +138,12 @@ head_avatar/
 ├── dataset.py                 # Sequence discovery, alignment, dataloaders
 ├── model.py                   # Audio-video fusion model and FLAME heads
 ├── train.py                   # Training loop and checkpoint saving
+├── train_motion_transvae.py   # Motion-only TransVAE training on LookingFace
 ├── inference.py               # Single-sequence prediction entry point
 ├── split_audio_video.py       # Raw MP4 -> WAV + video-only MP4
 ├── encode_audio_whisper.py    # WAV -> Whisper features
 ├── encode_video_qwen.py       # MP4 -> Qwen video embedding
+├── benchmark/                 # LookingFace benchmark datasets and model ports
 ├── checkpoints/               # Saved model checkpoints
 ├── output/                    # Logs and inference outputs
 └── data/
@@ -106,6 +160,7 @@ head_avatar/
 - `dataset.py`: discovers valid sequences and aligns audio features to FLAME frame counts
 - `model.py`: transformer-based fusion network with separate prediction heads per FLAME group
 - `train.py`: trains the model and writes checkpoints to `checkpoints/`
+- `train_motion_transvae.py`: trains the motion-only TransVAE using raw left video frames and wav2vec audio
 - `inference.py`: loads a checkpoint and writes predicted FLAME parameters for one sequence
 
 ### Preprocessing files
@@ -113,12 +168,14 @@ head_avatar/
 - `split_audio_video.py`: extracts 16 kHz WAV audio and video-only MP4 files from raw MP4 inputs
 - `encode_audio_whisper.py`: converts WAV audio to Whisper encoder features
 - `encode_video_qwen.py`: converts video to a single Qwen embedding per sequence
+- `scripts/preprocess_lookingface.py`: extracts WAV audio and wav2vec features for LookingFace training
 
 ### Data and generated artifacts
 
 - `data/audio`: extracted WAV files used for Whisper encoding
 - `data/video`: extracted MP4 files used for Qwen video encoding
 - `data/audio_embeddings`: `*_whisper.npy`, `*_proj.npy`, and `audio_projector_init.pt`
+- `data/wav2vec_embeddings`: wav2vec features used by `train_motion_transvae.py`
 - `data/video_embeddings`: one `*_left.npy` file per video sequence
 - `data/video_labels`: FLAME labels expected at `<seq_id>_right/flame_param.npz`
 - `checkpoints`: `best_model.pt`, `final_model.pt`, and periodic epoch checkpoints
@@ -173,6 +230,60 @@ micromamba activate qwen_vl
 
 
 ## End-to-end workflow
+
+### LookingFace motion TransVAE workflow
+
+Use this workflow when training `train_motion_transvae.py` on the official LookingFace splits.
+
+### 1. Rebuild the manifest after dataset edits
+
+```bash
+python manifest.py --rebuild
+```
+
+This rescans `data/LookingFace` and regenerates `data/manifest.json`.
+
+### 2. Precompute wav2vec features
+
+```bash
+python scripts/preprocess_lookingface.py --skip_existing --device cuda:0
+```
+
+Outputs:
+
+- `data/audio/<seq_id>_left.wav`
+- `data/wav2vec_embeddings/<seq_id>_left.npy`
+
+If direct Hugging Face access is blocked, run with:
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com python scripts/preprocess_lookingface.py --skip_existing --device cuda:0
+```
+
+### 3. Train on predefined train split and evaluate on predefined test split
+
+```bash
+python train_motion_transvae.py \
+  --predefined_splits_dir data/LookingFace/dataset_splits \
+  --epochs 100 \
+  --lr 1e-5 \
+  --checkpoint_dir checkpoints/motion_transvae_lookingface_predefined
+```
+
+Behavior:
+
+- train split comes from `data/LookingFace/dataset_splits/train.json`
+- evaluation split comes from `data/LookingFace/dataset_splits/test.json`
+- samples missing FLAME targets, right MP4 files, or wav2vec features are filtered out automatically
+- checkpoints are written under the provided checkpoint directory
+- final metrics are saved as `metrics.json` in that checkpoint directory
+
+Common training knobs:
+
+- `--epochs`: total number of epochs, default `100`
+- `--lr`: AdamW learning rate, default `1e-5`
+- `--batch_size`: batch size, default `2`
+- `--val_interval`: run evaluation every N epochs, default `5`
 
 ### 1. Split raw MP4 files into audio and video
 

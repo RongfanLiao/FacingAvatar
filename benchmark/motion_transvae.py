@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable
 
 import numpy as np
@@ -424,16 +426,68 @@ def diversity_loss(prediction_a: torch.Tensor, prediction_b: torch.Tensor, paddi
     return torch.exp(-dist2 / 100.0).mean()
 
 
+def _format_progress_logs(logs: dict[str, float], prefix: str) -> str:
+    ordered_keys = ["loss_total_with_div", "loss_total", "loss_rec", "loss_kld", "loss_div"]
+    parts = [prefix]
+    for key in ordered_keys:
+        if key in logs:
+            parts.append(f"{key}={logs[key]:.5f}")
+    return " | ".join(parts)
+
+
+def _format_elapsed(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_progress_prefix(
+    label: str,
+    batch_idx: int,
+    total_batches: int,
+    start_time: float,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elapsed_seconds = time.perf_counter() - start_time
+    elapsed = _format_elapsed(elapsed_seconds)
+    progress = (batch_idx / total_batches * 100.0) if total_batches > 0 else 0.0
+    avg_seconds = elapsed_seconds / batch_idx if batch_idx > 0 else 0.0
+    remaining_batches = max(total_batches - batch_idx, 0)
+    eta = _format_elapsed(avg_seconds * remaining_batches)
+    if epoch is not None and num_epochs is not None:
+        return (
+            f"[{timestamp}] [{label}] epoch {epoch}/{num_epochs} "
+            f"iter {batch_idx}/{total_batches} ({progress:.1f}%) elapsed={elapsed} eta={eta}"
+        )
+    return f"[{timestamp}] [{label}] iter {batch_idx}/{total_batches} ({progress:.1f}%) elapsed={elapsed} eta={eta}"
+
+
 def train_motion_transvae(
-    model, loader, optimizer, criterion, device, div_p: float = 10.0, scaler: torch.amp.GradScaler | None = None,
+    model,
+    loader,
+    optimizer,
+    criterion,
+    device,
+    div_p: float = 10.0,
+    scaler: torch.amp.GradScaler | None = None,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+    log_interval: int = 1,
 ) -> dict[str, float]:
     """One training epoch for the LookingFace motion-only TransVAE port."""
     model.train()
     totals: dict[str, float] = {}
     batches = 0
     use_amp = scaler is not None
+    total_batches = len(loader)
+    epoch_start_time = time.perf_counter()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
         target_key = "flame_target_58" if criterion.target_variant == "motion58" else "flame_target_content"
@@ -466,17 +520,40 @@ def train_motion_transvae(
             totals[key] = totals.get(key, 0.0) + value
         batches += 1
 
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label="train",
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=epoch_start_time,
+                epoch=epoch,
+                num_epochs=num_epochs,
+            )
+            print(_format_progress_logs(logs, prefix), flush=True)
+
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
 
 @torch.no_grad()
-def validate_motion_transvae(model, loader, criterion, device, use_amp: bool = False) -> dict[str, float]:
+def validate_motion_transvae(
+    model,
+    loader,
+    criterion,
+    device,
+    use_amp: bool = False,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
     """Validation loop for the LookingFace motion-only TransVAE port."""
     model.eval()
     totals: dict[str, float] = {}
     batches = 0
+    total_batches = len(loader)
+    eval_start_time = time.perf_counter()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
         target_key = "flame_target_58" if criterion.target_variant == "motion58" else "flame_target_content"
@@ -490,6 +567,17 @@ def validate_motion_transvae(model, loader, criterion, device, use_amp: bool = F
         for key, value in logs.items():
             totals[key] = totals.get(key, 0.0) + value
         batches += 1
+
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label=eval_label,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=eval_start_time,
+                epoch=epoch,
+                num_epochs=num_epochs,
+            )
+            print(_format_progress_logs(logs, prefix), flush=True)
 
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
@@ -608,8 +696,16 @@ def _stack_valid_sequences(items: Iterable[np.ndarray], feature_dim: int) -> np.
 
 
 @torch.no_grad()
-def evaluate_motion_metrics(model, loader, device, target_variant: str = "content", use_amp: bool = False) -> dict[str, float]:
-    """Compute paired motion metrics for the validation split."""
+def evaluate_motion_metrics(
+    model,
+    loader,
+    device,
+    target_variant: str = "content",
+    use_amp: bool = False,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    """Compute paired motion metrics for the evaluation split."""
     model.eval()
 
     abs_errors = []
@@ -620,6 +716,8 @@ def evaluate_motion_metrics(model, loader, device, target_variant: str = "conten
     seq_desc_target = []
     frc_list = []
     frd_list = []
+    evaluated_sequences = 0
+    evaluated_frames = 0
 
     if target_variant == "motion58":
         target_key = "flame_target_58"
@@ -632,7 +730,10 @@ def evaluate_motion_metrics(model, loader, device, target_variant: str = "conten
     else:
         raise ValueError(f"Unsupported target_variant: {target_variant}")
 
-    for batch in loader:
+    total_batches = len(loader)
+    eval_start_time = time.perf_counter()
+
+    for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
         target = batch[target_key].to(device)
@@ -674,6 +775,17 @@ def evaluate_motion_metrics(model, loader, device, target_variant: str = "conten
             ])
             seq_desc_pred.append(pred_desc.astype(np.float32))
             seq_desc_target.append(target_desc.astype(np.float32))
+            evaluated_sequences += 1
+            evaluated_frames += length
+
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label=f"{eval_label}-metrics",
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=eval_start_time,
+            )
+            print(f"{prefix} | sequences={evaluated_sequences} frames={evaluated_frames}", flush=True)
 
     abs_errors_arr = _stack_valid_sequences(abs_errors, feature_dim=feature_dim)
     sq_errors_arr = _stack_valid_sequences(sq_errors, feature_dim=feature_dim)
