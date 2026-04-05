@@ -40,3 +40,10 @@ from benchmark.regnn import (  # noqa: F401
     train_regnn,
     validate_regnn,
 )
+from benchmark.listenformer import (  # noqa: F401
+    ListenFormerLoss,
+    LookingFaceListenFormer,
+    evaluate_listenformer_metrics,
+    train_listenformer,
+    validate_listenformer,
+)
