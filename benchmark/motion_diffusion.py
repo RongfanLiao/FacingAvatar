@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
+from datetime import datetime
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from benchmark.motion_transvae import PositionalEncoding, evaluate_motion_metrics
+from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics
 from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from config import WAV2VEC_DIM
 
 
 def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
@@ -43,6 +46,59 @@ def build_inference_indices(train_timesteps: int, inference_timesteps: int, spac
     return indices
 
 
+def _format_progress_logs(logs: dict[str, float], prefix: str) -> str:
+    ordered_keys = [
+        "loss_total_with_clip",
+        "loss_total",
+        "loss_rec",
+        "loss_vel",
+        "loss_exp",
+        "loss_jaw",
+        "loss_neck",
+        "loss_eyes",
+        "loss_rot",
+        "loss_tran",
+        "mean_timestep",
+    ]
+    parts = [prefix]
+    for key in ordered_keys:
+        if key in logs:
+            parts.append(f"{key}={logs[key]:.5f}")
+    return " | ".join(parts)
+
+
+def _format_elapsed(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_progress_prefix(
+    label: str,
+    batch_idx: int,
+    total_batches: int,
+    start_time: float,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elapsed_seconds = time.perf_counter() - start_time
+    elapsed = _format_elapsed(elapsed_seconds)
+    progress = (batch_idx / total_batches * 100.0) if total_batches > 0 else 0.0
+    avg_seconds = elapsed_seconds / batch_idx if batch_idx > 0 else 0.0
+    remaining_batches = max(total_batches - batch_idx, 0)
+    eta = _format_elapsed(avg_seconds * remaining_batches)
+    if epoch is not None and num_epochs is not None:
+        return (
+            f"[{timestamp}] [{label}] epoch {epoch}/{num_epochs} "
+            f"iter {batch_idx}/{total_batches} ({progress:.1f}%) elapsed={elapsed} eta={eta}"
+        )
+    return f"[{timestamp}] [{label}] iter {batch_idx}/{total_batches} ({progress:.1f}%) elapsed={elapsed} eta={eta}"
+
+
 class DiffusionDenoiser(nn.Module):
     """Baseline-shaped transformer decoder with classifier-free condition dropout."""
 
@@ -51,7 +107,6 @@ class DiffusionDenoiser(nn.Module):
         target_dim: int,
         feature_dim: int,
         audio_dim: int,
-        video_dim: int,
         n_heads: int,
         num_layers: int,
         dropout: float,
@@ -73,14 +128,10 @@ class DiffusionDenoiser(nn.Module):
             nn.GELU(),
             nn.Linear(feature_dim * 2, feature_dim),
         )
+        self.video_encoder = VideoEncoder(feature_dim=feature_dim)
         self.audio_proj = nn.Linear(audio_dim, feature_dim)
-        self.video_proj = nn.Sequential(
-            nn.Linear(video_dim, feature_dim),
-            nn.GELU(),
-            nn.LayerNorm(feature_dim),
-        )
         self.latent_proj = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
+            nn.Linear(feature_dim * 2, feature_dim),
             nn.GELU(),
             nn.LayerNorm(feature_dim),
         )
@@ -132,7 +183,7 @@ class DiffusionDenoiser(nn.Module):
     def _encode_conditions(
         self,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         padding_mask: torch.Tensor | None,
         mode: str,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -141,25 +192,28 @@ class DiffusionDenoiser(nn.Module):
         audio_tokens = self.audio_encoder(audio_tokens, src_key_padding_mask=padding_mask)
         audio_tokens = self._mask_cond(audio_tokens, self.audio_drop_prob, mode)
 
+        video_tokens = self.video_encoder(left_video_frames)
+        video_tokens = self.query_pos(video_tokens)
+        video_tokens = self._mask_cond(video_tokens, self.video_drop_prob, mode)
+
         if padding_mask is not None:
             valid_mask = (~padding_mask).unsqueeze(-1).float()
             pooled_audio = (audio_tokens * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp_min(1.0)
+            pooled_video = (video_tokens * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp_min(1.0)
         else:
             pooled_audio = audio_tokens.mean(dim=1)
+            pooled_video = video_tokens.mean(dim=1)
 
-        latent_token = self.latent_proj(pooled_audio).unsqueeze(1)
+        latent_token = self.latent_proj(torch.cat([pooled_audio, pooled_video], dim=-1)).unsqueeze(1)
         latent_token = self._mask_cond(latent_token, self.latent_drop_prob, mode)
 
-        video_token = self.video_proj(left_video_feat).unsqueeze(1)
-        video_token = self._mask_cond(video_token, self.video_drop_prob, mode)
-
-        memory = torch.cat([latent_token, video_token, audio_tokens], dim=1)
+        memory = torch.cat([latent_token, video_tokens, audio_tokens], dim=1)
         memory = self.mem_pos(memory)
 
         memory_key_padding_mask = None
         if padding_mask is not None:
-            token_mask = torch.zeros(padding_mask.shape[0], 2, dtype=torch.bool, device=padding_mask.device)
-            memory_key_padding_mask = torch.cat([token_mask, padding_mask], dim=1)
+            token_mask = torch.zeros(padding_mask.shape[0], 1, dtype=torch.bool, device=padding_mask.device)
+            memory_key_padding_mask = torch.cat([token_mask, padding_mask, padding_mask], dim=1)
 
         return memory, memory_key_padding_mask
 
@@ -168,7 +222,7 @@ class DiffusionDenoiser(nn.Module):
         noisy_target: torch.Tensor,
         timesteps: torch.Tensor,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         padding_mask: torch.Tensor | None,
         mode: str,
     ) -> torch.Tensor:
@@ -178,7 +232,7 @@ class DiffusionDenoiser(nn.Module):
         time_token = self.time_proj(timestep_embedding(timesteps, self.feature_dim)).unsqueeze(1)
         memory, memory_key_padding_mask = self._encode_conditions(
             left_audio_feat=left_audio_feat,
-            left_video_feat=left_video_feat,
+            left_video_frames=left_video_frames,
             padding_mask=padding_mask,
             mode=mode,
         )
@@ -201,26 +255,26 @@ class DiffusionDenoiser(nn.Module):
         noisy_target: torch.Tensor,
         timesteps: torch.Tensor,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         padding_mask: torch.Tensor | None,
     ) -> torch.Tensor:
-        return self._forward_impl(noisy_target, timesteps, left_audio_feat, left_video_feat, padding_mask, mode="train")
+        return self._forward_impl(noisy_target, timesteps, left_audio_feat, left_video_frames, padding_mask, mode="train")
 
     def forward_with_cond_scale(
         self,
         noisy_target: torch.Tensor,
         timesteps: torch.Tensor,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         padding_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         if self.guidance_scale == 1.0:
-            return self._forward_impl(noisy_target, timesteps, left_audio_feat, left_video_feat, padding_mask, mode="train")
+            return self._forward_impl(noisy_target, timesteps, left_audio_feat, left_video_frames, padding_mask, mode="train")
 
         model_input = torch.cat([noisy_target, noisy_target], dim=0)
         time_input = torch.cat([timesteps, timesteps], dim=0)
         audio_input = torch.cat([left_audio_feat, left_audio_feat], dim=0)
-        video_input = torch.cat([left_video_feat, left_video_feat], dim=0)
+        video_input = torch.cat([left_video_frames, left_video_frames], dim=0)
         if padding_mask is not None:
             padding_input = torch.cat([padding_mask, padding_mask], dim=0)
         else:
@@ -236,8 +290,7 @@ class MotionDiffusionModel(nn.Module):
 
     def __init__(
         self,
-        audio_dim: int = 1280,
-        video_dim: int = 3584,
+        audio_dim: int = WAV2VEC_DIM,
         target_variant: str = "content",
         feature_dim: int = 256,
         n_heads: int = 8,
@@ -272,7 +325,6 @@ class MotionDiffusionModel(nn.Module):
             target_dim=self.target_dim,
             feature_dim=feature_dim,
             audio_dim=audio_dim,
-            video_dim=video_dim,
             n_heads=n_heads,
             num_layers=num_layers,
             dropout=dropout,
@@ -303,7 +355,7 @@ class MotionDiffusionModel(nn.Module):
         noisy_target: torch.Tensor,
         timesteps: torch.Tensor,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         padding_mask: torch.Tensor | None,
         use_guidance: bool,
     ) -> torch.Tensor:
@@ -312,7 +364,7 @@ class MotionDiffusionModel(nn.Module):
                 noisy_target=noisy_target,
                 timesteps=timesteps,
                 left_audio_feat=left_audio_feat,
-                left_video_feat=left_video_feat,
+                left_video_frames=left_video_frames,
                 padding_mask=padding_mask,
             )
         else:
@@ -320,7 +372,7 @@ class MotionDiffusionModel(nn.Module):
                 noisy_target=noisy_target,
                 timesteps=timesteps,
                 left_audio_feat=left_audio_feat,
-                left_video_feat=left_video_feat,
+                left_video_frames=left_video_frames,
                 padding_mask=padding_mask,
             )
         return prediction.clamp(min=-self.clip_sample, max=self.clip_sample)
@@ -328,7 +380,7 @@ class MotionDiffusionModel(nn.Module):
     def forward(
         self,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         lengths: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
         target: torch.Tensor | None = None,
@@ -337,7 +389,7 @@ class MotionDiffusionModel(nn.Module):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del lengths
         if target is None:
-            return self.sample(left_audio_feat, left_video_feat, padding_mask), {}
+            return self.sample(left_audio_feat, left_video_frames, padding_mask), {}
 
         batch_size = target.shape[0]
         if timesteps is None:
@@ -353,7 +405,7 @@ class MotionDiffusionModel(nn.Module):
             noisy_target=noisy_target,
             timesteps=timesteps,
             left_audio_feat=left_audio_feat,
-            left_video_feat=left_video_feat,
+            left_video_frames=left_video_frames,
             padding_mask=padding_mask,
             use_guidance=False,
         )
@@ -365,7 +417,7 @@ class MotionDiffusionModel(nn.Module):
     def sample(
         self,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, seq_len = left_audio_feat.shape[:2]
@@ -383,7 +435,7 @@ class MotionDiffusionModel(nn.Module):
                 noisy_target=sample,
                 timesteps=t,
                 left_audio_feat=left_audio_feat,
-                left_video_feat=left_video_feat,
+                left_video_frames=left_video_frames,
                 padding_mask=padding_mask,
                 use_guidance=True,
             )
@@ -484,15 +536,20 @@ def train_motion_diffusion(
     criterion: MotionDiffusionLoss,
     device: torch.device,
     grad_clip: float | None = 1.0,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+    log_interval: int = 1,
 ) -> dict[str, float]:
     """Run one diffusion training epoch."""
     model.train()
     totals: dict[str, float] = {}
     batches = 0
+    total_batches = len(loader)
+    epoch_start_time = time.perf_counter()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
-        left_video = batch["left_video_feat"].to(device)
+        left_video = batch["left_video_frames"].to(device)
         target = _resolve_target(batch, criterion.target_variant).to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
@@ -500,7 +557,7 @@ def train_motion_diffusion(
         optimizer.zero_grad()
         prediction, aux = model(
             left_audio_feat=left_audio,
-            left_video_feat=left_video,
+            left_video_frames=left_video,
             lengths=lengths,
             padding_mask=padding_mask,
             target=target,
@@ -517,6 +574,17 @@ def train_motion_diffusion(
             totals[key] = totals.get(key, 0.0) + value
         batches += 1
 
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label="train",
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=epoch_start_time,
+                epoch=epoch,
+                num_epochs=num_epochs,
+            )
+            print(_format_progress_logs(logs, prefix), flush=True)
+
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
 
@@ -526,22 +594,28 @@ def validate_motion_diffusion(
     loader,
     criterion: MotionDiffusionLoss,
     device: torch.device,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+    eval_label: str = "val",
+    log_interval: int = 1,
 ) -> dict[str, float]:
     """Validation loop using a single noisy denoising step objective."""
     model.eval()
     totals: dict[str, float] = {}
     batches = 0
+    total_batches = len(loader)
+    eval_start_time = time.perf_counter()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
-        left_video = batch["left_video_feat"].to(device)
+        left_video = batch["left_video_frames"].to(device)
         target = _resolve_target(batch, criterion.target_variant).to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
         prediction, aux = model(
             left_audio_feat=left_audio,
-            left_video_feat=left_video,
+            left_video_frames=left_video,
             lengths=lengths,
             padding_mask=padding_mask,
             target=target,
@@ -551,6 +625,17 @@ def validate_motion_diffusion(
         for key, value in logs.items():
             totals[key] = totals.get(key, 0.0) + value
         batches += 1
+
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label=eval_label,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=eval_start_time,
+                epoch=epoch,
+                num_epochs=num_epochs,
+            )
+            print(_format_progress_logs(logs, prefix), flush=True)
 
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
@@ -569,8 +654,8 @@ def evaluate_motion_diffusion_metrics(
             super().__init__()
             self.inner = inner
 
-        def forward(self, left_audio_feat, left_video_feat, lengths, padding_mask=None):
+        def forward(self, left_audio_feat, left_video_frames, lengths, padding_mask=None):
             del lengths
-            return self.inner.sample(left_audio_feat, left_video_feat, padding_mask), None
+            return self.inner.sample(left_audio_feat, left_video_frames, padding_mask), None
 
     return evaluate_motion_metrics(_SamplerWrapper(model), loader, device=device, target_variant=target_variant)

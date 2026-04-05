@@ -14,6 +14,7 @@ from benchmark.lookingface import (
     build_benchmark_split,
     collate_benchmark_batch,
     default_benchmark_split_path,
+    load_predefined_splits,
 )
 from benchmark.motion_diffusion import (
     MotionDiffusionLoss,
@@ -23,7 +24,8 @@ from benchmark.motion_diffusion import (
     validate_motion_diffusion,
 )
 from benchmark.motion_transvae import save_checkpoint
-from config import DEVICE, NUM_WORKERS
+from config import DEVICE, NUM_WORKERS, VIDEO_CANVAS_SIZE
+from manifest import load_manifest
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,22 +54,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--checkpoint_dir", default="checkpoints/motion_diffusion_port")
     parser.add_argument("--split_path", default=default_benchmark_split_path())
+    parser.add_argument("--predefined_splits_dir", type=str, default=None,
+                        help="Path to directory with train.json/valid.json/test.json predefined splits")
     parser.add_argument("--max_sequences", type=int, default=0)
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--target_variant", choices=["content", "motion58"], default="content")
+    parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
+    parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     return parser.parse_args()
 
 
-def make_loader(seq_ids: list[str], batch_size: int, num_workers: int, shuffle: bool, target_variant: str) -> DataLoader:
+def make_loader(
+    seq_ids: list[str],
+    batch_size: int,
+    num_workers: int,
+    shuffle: bool,
+    target_variant: str,
+    video_canvas_size: int,
+    manifest: dict[str, dict[str, str]] | None = None,
+) -> DataLoader:
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
-        load_left_audio=True,
-        load_left_video_embedding=True,
+        load_left_audio=False,
+        load_wav2vec_audio=True,
+        load_left_video_embedding=False,
+        load_left_video_raw=True,
+        video_canvas_size=video_canvas_size,
         load_flame_target=True,
         include_motion58_target=(target_variant == "motion58"),
         include_content_target=(target_variant == "content"),
         require_right_mp4=True,
+        manifest=manifest,
     )
     return DataLoader(
         dataset,
@@ -82,16 +100,60 @@ def make_loader(seq_ids: list[str], batch_size: int, num_workers: int, shuffle: 
 def main() -> None:
     args = parse_args()
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    eval_label = "val"
+    manifest = load_manifest()
 
-    train_seqs, val_seqs = build_benchmark_split(split_path=args.split_path)
+    if args.predefined_splits_dir:
+        splits = load_predefined_splits(
+            splits_dir=args.predefined_splits_dir,
+            manifest=manifest,
+            require_wav2vec_audio=True,
+        )
+        train_seqs = splits.get("train", [])
+        if "test" in splits:
+            eval_label = "test"
+            val_seqs = splits["test"]
+        else:
+            eval_label = "valid"
+            val_seqs = splits.get("valid", [])
+        print(f"Predefined splits: train={len(train_seqs)}, {eval_label}={len(val_seqs)}")
+    else:
+        train_seqs, val_seqs = build_benchmark_split(split_path=args.split_path, manifest=manifest)
+
     if args.max_sequences > 0:
         train_seqs = train_seqs[: args.max_sequences]
         val_seqs = val_seqs[: args.max_sequences]
     if args.train_val_same:
         val_seqs = train_seqs
 
-    train_loader = make_loader(train_seqs, args.batch_size, args.num_workers, shuffle=True, target_variant=args.target_variant)
-    val_loader = make_loader(val_seqs, args.batch_size, args.num_workers, shuffle=False, target_variant=args.target_variant)
+    if not train_seqs and not args.eval_only:
+        raise RuntimeError(
+            "No training sequences available. For motion_diffusion this usually means "
+            "wav2vec audio features are missing or the raw video files cannot be loaded."
+        )
+    if not val_seqs:
+        raise RuntimeError(
+            f"No {eval_label} sequences available. Check the predefined split files and required embeddings."
+        )
+
+    train_loader = make_loader(
+        train_seqs,
+        args.batch_size,
+        args.num_workers,
+        shuffle=True,
+        target_variant=args.target_variant,
+        video_canvas_size=args.video_canvas_size,
+        manifest=manifest,
+    )
+    val_loader = make_loader(
+        val_seqs,
+        args.batch_size,
+        args.num_workers,
+        shuffle=False,
+        target_variant=args.target_variant,
+        video_canvas_size=args.video_canvas_size,
+        manifest=manifest,
+    )
 
     model = MotionDiffusionModel(
         target_variant=args.target_variant,
@@ -125,6 +187,9 @@ def main() -> None:
                 criterion,
                 device=device,
                 grad_clip=args.grad_clip,
+                epoch=epoch,
+                num_epochs=args.epochs,
+                log_interval=args.log_interval,
             )
             print(
                 f"Epoch {epoch:4d}/{args.epochs} | "
@@ -134,7 +199,16 @@ def main() -> None:
             )
 
             if epoch % args.val_period == 0:
-                val_metrics = validate_motion_diffusion(model, val_loader, criterion, device=device)
+                val_metrics = validate_motion_diffusion(
+                    model,
+                    val_loader,
+                    criterion,
+                    device=device,
+                    epoch=epoch,
+                    num_epochs=args.epochs,
+                    eval_label=eval_label,
+                    log_interval=args.log_interval,
+                )
                 print(
                     f"  val_total={val_metrics['loss_total']:.5f} | "
                     f"val_rec={val_metrics['loss_rec']:.5f} | "

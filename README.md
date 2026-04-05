@@ -69,9 +69,21 @@ python train_motion_transvae.py \
   --checkpoint_dir checkpoints/motion_transvae_lookingface_predefined
 ```
 
+Resume the same run from the last saved checkpoint:
+
+```bash
+python train_motion_transvae.py \
+  --predefined_splits_dir data/LookingFace/dataset_splits \
+  --epochs 150 \
+  --lr 1e-5 \
+  --checkpoint_dir checkpoints/motion_transvae_lookingface_predefined \
+  --resume_checkpoint checkpoints/motion_transvae_lookingface_predefined/last.pt
+```
+
 Useful notes:
 
 - current defaults are `--epochs 100`, `--lr 1e-5`, and `--batch_size 2`
+- when resuming, `--epochs` is the total target epoch count for the run, not the number of extra epochs
 - `train_motion_transvae.py` labels predefined evaluation as `test` in logs and saved metrics when `test.json` is present
 - the script only uses samples that have a valid manifest entry, right-side FLAME target, right MP4, and wav2vec feature file
 - final metrics are written to `checkpoints/motion_transvae_lookingface_predefined/metrics.json`

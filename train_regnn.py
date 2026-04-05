@@ -15,7 +15,13 @@ from benchmark.lookingface import (
     collate_benchmark_batch,
     default_benchmark_split_path,
 )
-from benchmark.motion_transvae import save_checkpoint
+from benchmark.motion_transvae import (
+    checkpoint_state_dict,
+    extract_checkpoint_metric,
+    load_checkpoint,
+    resume_training_state,
+    save_checkpoint,
+)
 from benchmark.regnn import (
     LookingFaceREGNN,
     REGNNLoss,
@@ -56,6 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--target_variant", choices=["content", "motion58"], default="content")
+    parser.add_argument("--resume_checkpoint", type=str, default=None,
+                        help="Resume training from a saved checkpoint or raw state dict")
     return parser.parse_args()
 
 
@@ -115,10 +123,39 @@ def main() -> None:
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_path = os.path.join(args.checkpoint_dir, "best.pt")
+    start_epoch = 0
+    resume_metric: float | None = None
+
+    if args.resume_checkpoint:
+        resume_state = resume_training_state(
+            args.resume_checkpoint,
+            model,
+            device=device,
+            optimizer=optimizer,
+        )
+        start_epoch = int(resume_state["epoch"])
+        resume_metric = resume_state["primary_metric"]  # type: ignore[assignment]
+        print(
+            f"Resumed from {args.resume_checkpoint}: epoch={start_epoch}, "
+            f"optimizer_restored={resume_state['restored_optimizer']}"
+        )
 
     if not args.eval_only:
         best_val = float("inf")
-        for epoch in range(1, args.epochs + 1):
+        if os.path.exists(best_path):
+            best_metric = extract_checkpoint_metric(load_checkpoint(best_path, device))
+            if best_metric is not None:
+                best_val = best_metric
+        elif resume_metric is not None:
+            best_val = resume_metric
+
+        if start_epoch >= args.epochs:
+            print(
+                f"Resume checkpoint is already at epoch {start_epoch}, "
+                f"so no additional training will run for --epochs {args.epochs}."
+            )
+
+        for epoch in range(start_epoch + 1, args.epochs + 1):
             train_metrics = train_regnn(model, train_loader, optimizer, criterion, device=device, grad_clip=args.grad_clip)
             print(
                 f"Epoch {epoch:4d}/{args.epochs} | "
@@ -139,12 +176,12 @@ def main() -> None:
                     best_val = val_metrics["loss_total"]
                     save_checkpoint(best_path, model, optimizer, epoch, val_metrics)
 
-    if os.path.exists(best_path):
-        try:
-            checkpoint = torch.load(best_path, map_location=device, weights_only=True)
-        except TypeError:
-            checkpoint = torch.load(best_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
+    if args.eval_only and args.resume_checkpoint:
+        checkpoint = load_checkpoint(args.resume_checkpoint, device)
+        model.load_state_dict(checkpoint_state_dict(checkpoint))
+    elif os.path.exists(best_path):
+        checkpoint = load_checkpoint(best_path, device)
+        model.load_state_dict(checkpoint_state_dict(checkpoint))
 
     metric_results = evaluate_regnn_metrics(model, val_loader, device=device, target_variant=args.target_variant)
     metric_results["target_variant"] = args.target_variant

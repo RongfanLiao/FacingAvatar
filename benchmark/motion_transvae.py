@@ -854,3 +854,78 @@ def save_checkpoint(path: str, model: nn.Module, optimizer: torch.optim.Optimize
         },
         path,
     )
+
+
+def load_checkpoint(path: str, device: torch.device | str) -> dict[str, object]:
+    """Load a checkpoint file while remaining compatible with older torch versions."""
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(path, map_location=device)
+
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(f"Unsupported checkpoint payload in {path!r}: expected a dict")
+    return checkpoint
+
+
+def checkpoint_state_dict(checkpoint: dict[str, object]) -> dict[str, torch.Tensor]:
+    """Extract model weights from either a full training checkpoint or a raw state dict."""
+    state_dict = checkpoint.get("model_state_dict")
+    if isinstance(state_dict, dict):
+        return state_dict
+
+    if checkpoint and all(isinstance(value, torch.Tensor) for value in checkpoint.values()):
+        return checkpoint  # type: ignore[return-value]
+
+    raise RuntimeError("Checkpoint does not contain a model state dict")
+
+
+def extract_checkpoint_metric(checkpoint: dict[str, object], metric_name: str = "loss_total") -> float | None:
+    """Read the primary validation metric from a checkpoint when available."""
+    metrics = checkpoint.get("metrics")
+    if isinstance(metrics, dict):
+        value = metrics.get(metric_name)
+        if isinstance(value, (int, float)):
+            return float(value)
+
+    value = checkpoint.get("val_loss")
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    return None
+
+
+def resume_training_state(
+    path: str,
+    model: nn.Module,
+    device: torch.device | str,
+    optimizer: torch.optim.Optimizer | None = None,
+    scaler: torch.amp.GradScaler | None = None,
+) -> dict[str, object]:
+    """Restore model weights and, when available, optimizer/scaler state for training resume."""
+    checkpoint = load_checkpoint(path, device)
+    model.load_state_dict(checkpoint_state_dict(checkpoint))
+
+    restored_optimizer = False
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if optimizer is not None and isinstance(optimizer_state, dict):
+        optimizer.load_state_dict(optimizer_state)
+        restored_optimizer = True
+
+    restored_scaler = False
+    scaler_state = checkpoint.get("scaler_state_dict")
+    if scaler is not None and isinstance(scaler_state, dict):
+        scaler.load_state_dict(scaler_state)
+        restored_scaler = True
+
+    epoch = checkpoint.get("epoch")
+    start_epoch = int(epoch) if isinstance(epoch, int) else 0
+
+    return {
+        "checkpoint": checkpoint,
+        "epoch": start_epoch,
+        "primary_metric": extract_checkpoint_metric(checkpoint),
+        "restored_optimizer": restored_optimizer,
+        "restored_scaler": restored_scaler,
+        "is_full_checkpoint": "model_state_dict" in checkpoint,
+    }
