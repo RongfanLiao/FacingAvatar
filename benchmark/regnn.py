@@ -4,14 +4,71 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass
+from datetime import datetime
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from benchmark.motion_transvae import SpeakerContextEncoder, evaluate_motion_metrics
+from benchmark.motion_transvae import BaselineSpeakerEncoder, evaluate_motion_metrics
 from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from config import WAV2VEC_DIM
+
+
+def _format_progress_logs(logs: dict[str, float], prefix: str) -> str:
+    ordered_keys = [
+        "loss_total",
+        "loss_match",
+        "loss_mid",
+        "loss_logdet",
+        "loss_rec",
+        "loss_vel",
+        "loss_exp",
+        "loss_jaw",
+        "loss_neck",
+        "loss_eyes",
+        "loss_rot",
+        "loss_tran",
+    ]
+    parts = [prefix]
+    for key in ordered_keys:
+        if key in logs:
+            parts.append(f"{key}={logs[key]:.5f}")
+    return " | ".join(parts)
+
+
+def _format_elapsed(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_progress_prefix(
+    label: str,
+    batch_idx: int,
+    total_batches: int,
+    start_time: float,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    elapsed_seconds = time.perf_counter() - start_time
+    elapsed = _format_elapsed(elapsed_seconds)
+    progress = (batch_idx / total_batches * 100.0) if total_batches > 0 else 0.0
+    avg_seconds = elapsed_seconds / batch_idx if batch_idx > 0 else 0.0
+    remaining_batches = max(total_batches - batch_idx, 0)
+    eta = _format_elapsed(avg_seconds * remaining_batches)
+    if epoch is not None and num_epochs is not None:
+        return (
+            f"[{timestamp}] [{label}] epoch {epoch}/{num_epochs} "
+            f"iter {batch_idx}/{total_batches} ({progress:.1f}%) elapsed={elapsed} eta={eta}"
+        )
+    return f"[{timestamp}] [{label}] iter {batch_idx}/{total_batches} ({progress:.1f}%) elapsed={elapsed} eta={eta}"
 
 
 class MultiNodeMlp(nn.Module):
@@ -181,30 +238,31 @@ class REGNNCognitiveProcessor(nn.Module):
 
 
 class LookingFacePercepProcessor(nn.Module):
-    """Adapted perceptual fusion for LookingFace left audio plus static left video."""
+    """Baseline-style perceptual fusion for raw left video frames plus wav2vec audio."""
 
-    def __init__(self, audio_dim: int, video_dim: int, fused_dim: int, dropout: float = 0.1):
+    def __init__(self, audio_dim: int, fused_dim: int, dropout: float = 0.1):
         super().__init__()
-        self.encoder = SpeakerContextEncoder(
+        del dropout
+        self.encoder = BaselineSpeakerEncoder(
             audio_dim=audio_dim,
-            video_dim=video_dim,
             feature_dim=fused_dim,
-            n_heads=4,
-            num_layers=2,
-            dropout=dropout,
         )
 
-    def forward(self, left_audio_feat: torch.Tensor, left_video_feat: torch.Tensor, padding_mask: torch.Tensor | None) -> torch.Tensor:
-        return self.encoder(left_audio_feat, left_video_feat, padding_mask=padding_mask)
+    def forward(
+        self,
+        left_audio_feat: torch.Tensor,
+        left_video_frames: torch.Tensor,
+        padding_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return self.encoder(left_video_frames, left_audio_feat, padding_mask=padding_mask)
 
 
 class LookingFaceREGNN(nn.Module):
-    """Graph-based REGNN benchmark port for LookingFace."""
+    """Graph-based REGNN benchmark port using the shared raw-video plus wav2vec contract."""
 
     def __init__(
         self,
-        audio_dim: int = 1280,
-        video_dim: int = 3584,
+        audio_dim: int = WAV2VEC_DIM,
         fused_dim: int = 64,
         target_variant: str = "content",
         num_frames: int = 50,
@@ -225,7 +283,7 @@ class LookingFaceREGNN(nn.Module):
         self.target_variant = target_variant
         self.num_frames = num_frames
         self.noise_threshold = noise_threshold
-        self.perceptual_processor = LookingFacePercepProcessor(audio_dim=audio_dim, video_dim=video_dim, fused_dim=fused_dim, dropout=dropout)
+        self.perceptual_processor = LookingFacePercepProcessor(audio_dim=audio_dim, fused_dim=fused_dim, dropout=dropout)
         self.cognitive_processor = REGNNCognitiveProcessor(
             input_dim=fused_dim,
             output_nodes=self.target_dim,
@@ -243,10 +301,10 @@ class LookingFaceREGNN(nn.Module):
     def forward_features(
         self,
         left_audio_clip: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_clip: torch.Tensor,
         padding_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        fused = self.perceptual_processor(left_audio_clip, left_video_feat, padding_mask=padding_mask)
+        fused = self.perceptual_processor(left_audio_clip, left_video_clip, padding_mask=padding_mask)
         return self.cognitive_processor(fused)
 
     def sample(self, speaker_feature: torch.Tensor, threshold: float | None = None) -> torch.Tensor:
@@ -262,11 +320,11 @@ class LookingFaceREGNN(nn.Module):
     def forward(
         self,
         left_audio_clip: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video_clip: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
         target_clip: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        speaker_feature, edge = self.forward_features(left_audio_clip, left_video_feat, padding_mask=padding_mask)
+        speaker_feature, edge = self.forward_features(left_audio_clip, left_video_clip, padding_mask=padding_mask)
         outputs = {
             "speaker_feature": speaker_feature,
             "edge": edge,
@@ -284,7 +342,7 @@ class LookingFaceREGNN(nn.Module):
     def predict_sequence(
         self,
         left_audio_feat: torch.Tensor,
-        left_video_feat: torch.Tensor,
+        left_video: torch.Tensor,
         lengths: torch.Tensor,
         target_variant: str,
     ) -> torch.Tensor:
@@ -293,7 +351,10 @@ class LookingFaceREGNN(nn.Module):
         for batch_idx, length in enumerate(lengths.tolist()):
             seq_preds = []
             audio_seq = left_audio_feat[batch_idx, :length]
-            video_feat = left_video_feat[batch_idx : batch_idx + 1]
+            if left_video.dim() == 5:
+                video_seq = left_video[batch_idx, :length]
+            else:
+                video_seq = left_video[batch_idx : batch_idx + 1]
             for start in range(0, length, self.num_frames):
                 end = min(start + self.num_frames, length)
                 clip = audio_seq[start:end]
@@ -302,8 +363,21 @@ class LookingFaceREGNN(nn.Module):
                     pad = torch.zeros(self.num_frames - valid_len, clip.shape[-1], device=clip.device, dtype=clip.dtype)
                     clip = torch.cat([clip, pad], dim=0)
                 clip = clip.unsqueeze(0)
+                if left_video.dim() == 5:
+                    video_clip = video_seq[start:end]
+                    if valid_len < self.num_frames:
+                        video_pad = torch.zeros(
+                            self.num_frames - valid_len,
+                            *video_clip.shape[1:],
+                            device=video_clip.device,
+                            dtype=video_clip.dtype,
+                        )
+                        video_clip = torch.cat([video_clip, video_pad], dim=0)
+                    video_clip = video_clip.unsqueeze(0)
+                else:
+                    video_clip = video_seq
                 padding_mask = torch.arange(self.num_frames, device=clip.device).unsqueeze(0) >= valid_len
-                output = self.forward(clip, video_feat, padding_mask=padding_mask, target_clip=None)["prediction"]
+                output = self.forward(clip, video_clip, padding_mask=padding_mask, target_clip=None)["prediction"]
                 seq_preds.append(output[0, :valid_len])
             predictions.append(torch.cat(seq_preds, dim=0))
 
@@ -329,11 +403,14 @@ def build_regnn_clips(
 ) -> dict[str, torch.Tensor]:
     """Extract fixed-size clips from padded full sequences for REGNN training."""
     left_audio = batch["left_audio_feat"]
-    left_video = batch["left_video_feat"]
+    left_video = batch.get("left_video_frames", batch.get("left_video_feat"))
+    if left_video is None:
+        raise KeyError("REGNN expects left_video_frames or left_video_feat in the batch")
     target = _resolve_target(batch, target_variant)
     lengths = batch["lengths"]
 
     audio_clips = []
+    video_clips = []
     target_clips = []
     clip_lengths = []
     for batch_idx, seq_len in enumerate(lengths.tolist()):
@@ -347,22 +424,34 @@ def build_regnn_clips(
         valid_len = end - start
 
         audio_clip = left_audio[batch_idx, start:end]
+        if left_video.dim() == 5:
+            video_clip = left_video[batch_idx, start:end]
+        else:
+            video_clip = left_video[batch_idx]
         target_clip = target[batch_idx, start:end]
         if valid_len < num_frames:
             audio_pad = torch.zeros(num_frames - valid_len, audio_clip.shape[-1], dtype=audio_clip.dtype)
             target_pad = torch.zeros(num_frames - valid_len, target_clip.shape[-1], dtype=target_clip.dtype)
             audio_clip = torch.cat([audio_clip, audio_pad], dim=0)
             target_clip = torch.cat([target_clip, target_pad], dim=0)
+            if left_video.dim() == 5:
+                video_pad = torch.zeros(num_frames - valid_len, *video_clip.shape[1:], dtype=video_clip.dtype)
+                video_clip = torch.cat([video_clip, video_pad], dim=0)
 
         audio_clips.append(audio_clip)
+        video_clips.append(video_clip)
         target_clips.append(target_clip)
         clip_lengths.append(valid_len)
 
     clip_lengths_tensor = torch.tensor(clip_lengths, dtype=torch.long)
     padding_mask = torch.arange(num_frames).unsqueeze(0) >= clip_lengths_tensor.unsqueeze(1)
+    if left_video.dim() == 5:
+        left_video_clip = torch.stack(video_clips, dim=0)
+    else:
+        left_video_clip = torch.stack(video_clips, dim=0)
     return {
         "left_audio_clip": torch.stack(audio_clips, dim=0),
-        "left_video_feat": left_video,
+        "left_video_clip": left_video_clip,
         "target_clip": torch.stack(target_clips, dim=0),
         "clip_lengths": clip_lengths_tensor,
         "padding_mask": padding_mask,
@@ -509,16 +598,21 @@ def train_regnn(
     criterion: REGNNLoss,
     device: torch.device,
     grad_clip: float | None = 1.0,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+    log_interval: int = 1,
 ) -> dict[str, float]:
     """Run one REGNN training epoch on random fixed windows."""
     model.train()
     totals: dict[str, float] = {}
     batches = 0
+    total_batches = len(loader)
+    epoch_start_time = time.perf_counter()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         clip_batch = build_regnn_clips(batch, criterion.target_variant, num_frames=model.num_frames, random_start=True)
         left_audio = clip_batch["left_audio_clip"].to(device)
-        left_video = clip_batch["left_video_feat"].to(device)
+        left_video = clip_batch["left_video_clip"].to(device)
         target = clip_batch["target_clip"].to(device)
         padding_mask = clip_batch["padding_mask"].to(device)
 
@@ -535,6 +629,17 @@ def train_regnn(
             totals[key] = totals.get(key, 0.0) + value
         batches += 1
 
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label="train",
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=epoch_start_time,
+                epoch=epoch,
+                num_epochs=num_epochs,
+            )
+            print(_format_progress_logs(logs, prefix), flush=True)
+
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
 
@@ -544,16 +649,22 @@ def validate_regnn(
     loader,
     criterion: REGNNLoss,
     device: torch.device,
+    epoch: int | None = None,
+    num_epochs: int | None = None,
+    eval_label: str = "val",
+    log_interval: int = 1,
 ) -> dict[str, float]:
     """Validate REGNN on deterministic first-window clips."""
     model.eval()
     totals: dict[str, float] = {}
     batches = 0
+    total_batches = len(loader)
+    eval_start_time = time.perf_counter()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         clip_batch = build_regnn_clips(batch, criterion.target_variant, num_frames=model.num_frames, random_start=False)
         left_audio = clip_batch["left_audio_clip"].to(device)
-        left_video = clip_batch["left_video_feat"].to(device)
+        left_video = clip_batch["left_video_clip"].to(device)
         target = clip_batch["target_clip"].to(device)
         padding_mask = clip_batch["padding_mask"].to(device)
 
@@ -563,6 +674,17 @@ def validate_regnn(
         for key, value in logs.items():
             totals[key] = totals.get(key, 0.0) + value
         batches += 1
+
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label=eval_label,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=eval_start_time,
+                epoch=epoch,
+                num_epochs=num_epochs,
+            )
+            print(_format_progress_logs(logs, prefix), flush=True)
 
     return {key: value / max(batches, 1) for key, value in totals.items()}
 

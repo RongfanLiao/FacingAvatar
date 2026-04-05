@@ -1,9 +1,10 @@
-"""Inference entrypoint for both legacy and motion TransVAE checkpoints.
+"""Inference entrypoint for legacy, motion TransVAE, and REGNN checkpoints.
 
 Usage:
     python inference.py --seq_id 2920
     python inference.py --seq_id 2920 --checkpoint checkpoints/best_model.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/motion_transvae_lookingface/best.pt
+    python inference.py --seq_id 0012 --checkpoint checkpoints/regnn_lookingface/best.pt
 """
 
 import argparse
@@ -17,6 +18,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from benchmark.lookingface import _fit_frame_to_canvas
 from benchmark.motion_transvae import MotionOnlyTransformerVAE
+from benchmark.regnn import LookingFaceREGNN
 from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
 from config import (
     AUDIO_EMB_DIR, VIDEO_EMB_DIR,
@@ -38,9 +40,43 @@ def _load_checkpoint(checkpoint: str, device: torch.device) -> dict[str, object]
 def _detect_checkpoint_family(checkpoint_state: dict[str, torch.Tensor]) -> str:
     if "decoder.output_head.weight" in checkpoint_state:
         return "motion_transvae"
+    if "cognitive_processor.convert_layer.weight1" in checkpoint_state:
+        return "regnn"
     if "flame_head.expr_head.weight" in checkpoint_state:
         return "legacy_av"
     raise RuntimeError("Unsupported checkpoint format")
+
+
+def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int | str]:
+    fused_dim = int(checkpoint_state["perceptual_processor.encoder.audio_feature_map.weight"].shape[0])
+    audio_dim = int(checkpoint_state["perceptual_processor.encoder.audio_feature_map.weight"].shape[1])
+    num_frames = int(checkpoint_state["cognitive_processor.convert_layer.weight1"].shape[0])
+    target_dim = int(checkpoint_state["cognitive_processor.convert_layer.weight2"].shape[-1])
+    edge_qk_shape = checkpoint_state["cognitive_processor.edge_layer.qk.weight"].shape
+    edge_dim = int(edge_qk_shape[0] // max(2 * num_frames, 1))
+    layer_indices = {
+        int(parts[2])
+        for key in checkpoint_state
+        if key.startswith("motor_processor.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 3 and parts[2].isdigit()
+    }
+    layers = max(layer_indices) + 1 if layer_indices else 2
+    if target_dim == FLAME_CONTENT_DIM:
+        target_variant = "content"
+    elif target_dim == FLAME_58_DIM:
+        target_variant = "motion58"
+    else:
+        raise RuntimeError(f"Unsupported REGNN target dim: {target_dim}")
+
+    return {
+        "audio_dim": audio_dim,
+        "fused_dim": fused_dim,
+        "num_frames": num_frames,
+        "edge_dim": edge_dim,
+        "layers": layers,
+        "target_variant": target_variant,
+    }
 
 
 def _build_motion_transvae_inputs(seq_id: str, n_frames: int, video_canvas_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -193,6 +229,59 @@ def predict_motion_transvae(
         label_npz.close()
 
 
+def predict_regnn(
+    seq_id: str,
+    checkpoint: str,
+    n_frames: int,
+    video_canvas_size: int,
+    neighbors: int,
+    act_type: str,
+    noise_threshold: float | None,
+) -> dict[str, np.ndarray]:
+    device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    ckpt = _load_checkpoint(checkpoint, device)
+    state_dict = ckpt["model_state_dict"]
+    regnn_config = _infer_regnn_config(state_dict)
+    target_variant = str(regnn_config["target_variant"])
+    target_dim = FLAME_CONTENT_DIM if target_variant == "content" else FLAME_58_DIM
+
+    model = LookingFaceREGNN(
+        audio_dim=int(regnn_config["audio_dim"]),
+        fused_dim=int(regnn_config["fused_dim"]),
+        target_variant=target_variant,
+        num_frames=int(regnn_config["num_frames"]),
+        edge_dim=int(regnn_config["edge_dim"]),
+        neighbors=neighbors,
+        layers=int(regnn_config["layers"]),
+        act_type=act_type,
+        noise_threshold=noise_threshold,
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    audio_t, video_t, lengths, _ = _build_motion_transvae_inputs(seq_id, n_frames, video_canvas_size)
+    audio_t = audio_t.to(device)
+    video_t = video_t.to(device)
+    lengths = lengths.to(device)
+
+    with torch.no_grad():
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+            prediction = model.predict_sequence(
+                left_audio_feat=audio_t,
+                left_video=video_t,
+                lengths=lengths,
+                target_variant=target_variant,
+            )
+
+    pred_np = prediction[0, :n_frames].detach().cpu().numpy().astype(np.float32)
+    manifest = load_manifest()
+    label_npz = np.load(manifest[seq_id]["flame_npz"])
+    try:
+        return _motion_prediction_to_flame(pred_np, label_npz, target_dim)
+    finally:
+        label_npz.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Predict FLAME params from audio+video")
     parser.add_argument("--seq_id", type=str, required=True, help="Sequence ID (e.g. 2920)")
@@ -202,6 +291,9 @@ def main():
     parser.add_argument("--gen_vis", action="store_true", help="Pack output into a per-sequence dir with foreground_image.png and transforms.json for visualization")
     parser.add_argument("--smooth", type=int, default=0, help="Temporal smoothing window size (0=disabled)")
     parser.add_argument("--video_canvas_size", type=int, default=400, help="Canvas size for motion TransVAE raw-frame inference")
+    parser.add_argument("--regnn_neighbors", type=int, default=6, help="Neighbor count used by REGNN edge sparsification at inference time")
+    parser.add_argument("--regnn_act_type", choices=["ELU", "ReLU", "GeLU", "None"], default="ELU", help="REGNN graph activation used when reconstructing the model for inference")
+    parser.add_argument("--regnn_noise_threshold", type=float, default=0.0, help="Optional REGNN noise threshold for internal sampling; <=0 disables it")
     args = parser.parse_args()
 
     # Load label npz for static keys and frame count
@@ -223,6 +315,16 @@ def main():
             args.checkpoint,
             n_frames,
             video_canvas_size=args.video_canvas_size,
+        )
+    elif checkpoint_family == "regnn":
+        results = predict_regnn(
+            args.seq_id,
+            args.checkpoint,
+            n_frames,
+            video_canvas_size=args.video_canvas_size,
+            neighbors=args.regnn_neighbors,
+            act_type=args.regnn_act_type,
+            noise_threshold=(args.regnn_noise_threshold if args.regnn_noise_threshold > 0 else None),
         )
     else:
         results = predict(args.seq_id, args.checkpoint, n_frames)

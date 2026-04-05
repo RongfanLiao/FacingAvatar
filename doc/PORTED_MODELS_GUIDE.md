@@ -232,12 +232,18 @@ Implementation:
 Data flow:
 
 1. a fixed-length clip is sampled from each padded full sequence for training
-2. `LookingFacePercepProcessor` fuses left-audio sequence and left-video embedding into a temporal feature stream
+2. `LookingFacePercepProcessor` fuses wav2vec left-audio and raw left-video frames into a temporal feature stream
 3. `REGNNCognitiveProcessor` converts fused features into node-wise speaker graph features and learned graph edges
 4. `LipschitzGraph` acts as the motor processor
 5. training primarily aligns speaker graph features with listener graph features produced from the target clip
 6. decoded sequence reconstruction is available as an auxiliary term
 7. full-sequence evaluation is performed by sliding over the sequence in `num_frames` chunks and stitching predictions back together
+
+Inference details:
+
+1. REGNN checkpoints are supported by the shared `inference.py` entrypoint
+2. inference uses the same raw-video plus wav2vec input contract as training
+3. predictions are converted back into the repository FLAME `.npz` format so they can be reused for visualization and video generation
 
 Training target:
 
