@@ -842,18 +842,25 @@ def evaluate_motion_metrics(
     return metrics
 
 
-def save_checkpoint(path: str, model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, metrics: dict[str, float]) -> None:
+def save_checkpoint(
+    path: str,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    metrics: dict[str, float],
+    extra_state: dict[str, object] | None = None,
+) -> None:
     """Save a checkpoint for benchmark training."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "metrics": metrics,
-        },
-        path,
-    )
+    payload: dict[str, object] = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "metrics": metrics,
+    }
+    if extra_state:
+        payload.update(extra_state)
+    torch.save(payload, path)
 
 
 def load_checkpoint(path: str, device: torch.device | str) -> dict[str, object]:

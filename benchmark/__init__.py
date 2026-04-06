@@ -54,3 +54,10 @@ from benchmark.dyadic_dim import (  # noqa: F401
     train_dyadic_dim,
     validate_dyadic_dim,
 )
+from benchmark.dualtalk import (  # noqa: F401
+    DualTalkLoss,
+    LookingFaceDualTalk,
+    evaluate_dualtalk_metrics,
+    train_dualtalk,
+    validate_dualtalk,
+)

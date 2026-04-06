@@ -9,6 +9,9 @@ The following baseline models have been ported for benchmarking on the LookingFa
 1. `motion_transvae`
 2. `motion_diffusion`
 3. `REGNN`
+4. `ListenFormer`
+5. `Dyadic ContinuousTransformer`
+6. `DualTalk`
 
 These ports are not byte-for-byte copies of `../baseline_react2025`. They preserve the main modeling ideas where practical, but they are adapted to the data contract available in this repository:
 
@@ -17,6 +20,8 @@ These ports are not byte-for-byte copies of `../baseline_react2025`. They preser
 3. right-side FLAME targets
 
 The shared benchmark code lives under `benchmark/`.
+
+Newer ports in this repository now standardize on wav2vec audio plus raw left-video frames as the input contract, and they export FLAME `.npz` predictions through the shared `inference.py` entrypoint.
 
 ## Files
 
@@ -31,12 +36,18 @@ Ported model modules:
 1. `benchmark/motion_transvae.py`
 2. `benchmark/motion_diffusion.py`
 3. `benchmark/regnn.py`
+4. `benchmark/listenformer.py`
+5. `benchmark/dyadic_dim.py`
+6. `benchmark/dualtalk.py`
 
 Training entrypoints:
 
 1. `train_motion_transvae.py`
 2. `train_motion_diffusion.py`
 3. `train_regnn.py`
+4. `train_listenformer.py`
+5. `train_dyadic_dim.py`
+6. `train_dualtalk.py`
 
 Utility script:
 
@@ -134,7 +145,7 @@ This target is preferred because it emphasizes the face-content components that 
 
 ## Shared Training and Evaluation Data Flow
 
-All three benchmark training scripts follow the same high-level flow:
+All benchmark training scripts follow the same high-level flow:
 
 1. build or load a reproducible train/validation split with `build_benchmark_split`
 2. create `LookingFaceBenchmarkDataset` instances
@@ -161,6 +172,8 @@ Each training script writes into its own checkpoint directory, typically:
 1. `best.pt`
 2. `last.pt`
 3. `metrics.json`
+
+Some ports also store extra reconstruction metadata in the checkpoint payload so `inference.py` can rebuild the model architecture without relying on CLI defaults. DualTalk now writes its architecture hyperparameters this way.
 
 ## Model-specific Training Data Flow
 
@@ -258,6 +271,81 @@ The more faithful default objective in the current port is:
 2. optional mid-loss regularizer
 3. optional logdet term
 4. optional decoded reconstruction auxiliary
+
+### 4. ListenFormer
+
+Implementation:
+
+1. `benchmark/listenformer.py`
+2. `train_listenformer.py`
+
+Data flow:
+
+1. wav2vec left-audio features and raw left-video frames are fused into a temporal conditioning sequence
+2. a ListenFormer-style encoder and decoder predict FLAME `content` targets autoregressively during inference
+3. training uses teacher forcing against the repository-native content target
+
+Training target:
+
+1. `flame_target_content` only
+
+Inference details:
+
+1. ListenFormer checkpoints are supported by `inference.py`
+2. predictions are exported as FLAME `.npz` files compatible with the local visualization pipeline
+
+### 5. Dyadic ContinuousTransformer
+
+Implementation:
+
+1. `benchmark/dyadic_dim.py`
+2. `train_dyadic_dim.py`
+
+Data flow:
+
+1. wav2vec left-audio features and raw left-video frames are encoded into a speaker context stream
+2. a transformer encoder-decoder predicts either FLAME `content` or reduced `motion58` targets
+3. training uses masked reconstruction with a velocity term
+
+Training target:
+
+1. default: `flame_target_content`
+2. optional: `flame_target_58`
+
+Inference details:
+
+1. Dyadic checkpoints are supported by `inference.py`
+2. predictions are exported back to FLAME `.npz`
+
+### 6. DualTalk
+
+Implementation:
+
+1. `benchmark/dualtalk.py`
+2. `train_dualtalk.py`
+
+Data flow:
+
+1. `BaselineSpeakerEncoder` fuses wav2vec left-audio and raw left-video frames into a shared temporal feature stream
+2. the DualTalk port derives two internal conditioning streams from that shared sequence: a primary stream and a proxy partner stream
+3. `CrossModalTemporalEnhancer` builds a motion-context proxy from the shared speaker features instead of consuming external partner motion
+4. `DualSpeakerInteractionModule` preserves the original two-stream interaction pattern with transformer-based temporal fusion
+5. `ExpressiveSynthesisModule` predicts FLAME `content` targets directly
+
+Training target:
+
+1. `flame_target_content` only
+
+Training objective:
+
+1. masked content reconstruction loss
+2. masked temporal velocity loss
+
+Inference details:
+
+1. DualTalk checkpoints are supported by `inference.py`
+2. predictions are exported in the repository FLAME `.npz` format
+3. DualTalk checkpoints now store explicit architecture hyperparameters in `model_config`, and inference prefers those saved values when reconstructing the model
 5. optional velocity auxiliary
 
 Note that the baseline REACT training uses multi-candidate targets more heavily than the current LookingFace pairing setup. This port keeps the graph structure and the latent objective shape, but it is still adapted to a single paired target per sample in this repository.
