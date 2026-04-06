@@ -1,4 +1,4 @@
-"""Inference entrypoint for legacy, motion TransVAE, REGNN, and ListenFormer checkpoints.
+"""Inference entrypoint for legacy, motion TransVAE, REGNN, ListenFormer, and Dyadic DIM checkpoints.
 
 Usage:
     python inference.py --seq_id 2920
@@ -6,6 +6,7 @@ Usage:
     python inference.py --seq_id 0012 --checkpoint checkpoints/motion_transvae_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/regnn_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/listenformer_content/best.pt
+    python inference.py --seq_id 0012 --checkpoint checkpoints/dyadic_dim/best.pt
 """
 
 import argparse
@@ -18,6 +19,7 @@ from scipy.ndimage import uniform_filter1d
 from torch.nn.utils.rnn import pad_sequence
 
 from benchmark.lookingface import _fit_frame_to_canvas
+from benchmark.dyadic_dim import DyadicContinuousTransformer
 from benchmark.motion_transvae import MotionOnlyTransformerVAE
 from benchmark.listenformer import LookingFaceListenFormer
 from benchmark.regnn import LookingFaceREGNN
@@ -42,6 +44,8 @@ def _load_checkpoint(checkpoint: str, device: torch.device) -> dict[str, object]
 def _detect_checkpoint_family(checkpoint_state: dict[str, torch.Tensor]) -> str:
     if "decoder.output_head.weight" in checkpoint_state:
         return "motion_transvae"
+    if "context_encoder.audio_feature_map.weight" in checkpoint_state and "encoder.layers.0.self_attn.in_proj_weight" in checkpoint_state:
+        return "dyadic_dim"
     if "start_token" in checkpoint_state and "condition_proj.weight" in checkpoint_state:
         return "listenformer"
     if "cognitive_processor.convert_layer.weight1" in checkpoint_state:
@@ -77,6 +81,42 @@ def _infer_listenformer_config(checkpoint_state: dict[str, torch.Tensor]) -> dic
         "output_dim": output_dim,
         "num_encoder_layers": num_encoder_layers,
         "num_decoder_layers": num_decoder_layers,
+    }
+
+
+def _infer_dyadic_dim_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int | str]:
+    feature_dim = int(checkpoint_state["context_encoder.audio_feature_map.weight"].shape[0])
+    audio_dim = int(checkpoint_state["context_encoder.audio_feature_map.weight"].shape[1])
+    output_dim = int(checkpoint_state["output_head.3.weight"].shape[0])
+    encoder_layer_indices = {
+        int(parts[2])
+        for key in checkpoint_state
+        if key.startswith("encoder.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 3 and parts[2].isdigit()
+    }
+    decoder_layer_indices = {
+        int(parts[2])
+        for key in checkpoint_state
+        if key.startswith("decoder.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 3 and parts[2].isdigit()
+    }
+    num_encoder_layers = max(encoder_layer_indices) + 1 if encoder_layer_indices else 6
+    num_decoder_layers = max(decoder_layer_indices) + 1 if decoder_layer_indices else 6
+    if output_dim == FLAME_CONTENT_DIM:
+        target_variant = "content"
+    elif output_dim == FLAME_58_DIM:
+        target_variant = "motion58"
+    else:
+        raise RuntimeError(f"Unsupported Dyadic DIM output dim: {output_dim}")
+    return {
+        "feature_dim": feature_dim,
+        "audio_dim": audio_dim,
+        "output_dim": output_dim,
+        "num_encoder_layers": num_encoder_layers,
+        "num_decoder_layers": num_decoder_layers,
+        "target_variant": target_variant,
     }
 
 
@@ -371,6 +411,60 @@ def predict_listenformer(
         label_npz.close()
 
 
+def predict_dyadic_dim(
+    seq_id: str,
+    checkpoint: str,
+    n_frames: int,
+    video_canvas_size: int,
+    n_heads: int,
+    dropout: float,
+    video_chunk_size: int,
+) -> dict[str, np.ndarray]:
+    device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    ckpt = _load_checkpoint(checkpoint, device)
+    state_dict = ckpt["model_state_dict"]
+    dyadic_config = _infer_dyadic_dim_config(state_dict)
+    target_variant = str(dyadic_config["target_variant"])
+    output_dim = int(dyadic_config["output_dim"])
+
+    model = DyadicContinuousTransformer(
+        audio_dim=int(dyadic_config["audio_dim"]),
+        target_variant=target_variant,
+        feature_dim=int(dyadic_config["feature_dim"]),
+        n_heads=n_heads,
+        num_encoder_layers=int(dyadic_config["num_encoder_layers"]),
+        num_decoder_layers=int(dyadic_config["num_decoder_layers"]),
+        dropout=dropout,
+        video_chunk_size=video_chunk_size,
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    audio_t, video_t, lengths, padding_mask = _build_motion_transvae_inputs(seq_id, n_frames, video_canvas_size)
+    audio_t = audio_t.to(device)
+    video_t = video_t.to(device)
+    lengths = lengths.to(device)
+    padding_mask = padding_mask.to(device)
+
+    with torch.no_grad():
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+            prediction, _ = model(
+                left_audio_feat=audio_t,
+                left_video_frames=video_t,
+                lengths=lengths,
+                padding_mask=padding_mask,
+                target=None,
+            )
+
+    pred_np = prediction[0, :n_frames].detach().cpu().numpy().astype(np.float32)
+    manifest = load_manifest()
+    label_npz = np.load(manifest[seq_id]["flame_npz"])
+    try:
+        return _motion_prediction_to_flame(pred_np, label_npz, output_dim)
+    finally:
+        label_npz.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Predict FLAME params from audio+video")
     parser.add_argument("--seq_id", type=str, required=True, help="Sequence ID (e.g. 2920)")
@@ -380,6 +474,9 @@ def main():
     parser.add_argument("--gen_vis", action="store_true", help="Pack output into a per-sequence dir with foreground_image.png and transforms.json for visualization")
     parser.add_argument("--smooth", type=int, default=0, help="Temporal smoothing window size (0=disabled)")
     parser.add_argument("--video_canvas_size", type=int, default=400, help="Canvas size for motion TransVAE raw-frame inference")
+    parser.add_argument("--dyadic_n_heads", type=int, default=8, help="Dyadic ContinuousTransformer attention head count used when reconstructing the model for inference")
+    parser.add_argument("--dyadic_dropout", type=float, default=0.1, help="Dyadic ContinuousTransformer dropout used when reconstructing the model for inference")
+    parser.add_argument("--dyadic_video_chunk_size", type=int, default=8, help="Dyadic ContinuousTransformer video encoder chunk size for inference")
     parser.add_argument("--listenformer_n_heads", type=int, default=8, help="ListenFormer attention head count used when reconstructing the model for inference")
     parser.add_argument("--listenformer_dropout", type=float, default=0.1, help="ListenFormer dropout used when reconstructing the model for inference")
     parser.add_argument("--listenformer_video_chunk_size", type=int, default=8, help="ListenFormer video encoder chunk size for inference")
@@ -407,6 +504,16 @@ def main():
             args.checkpoint,
             n_frames,
             video_canvas_size=args.video_canvas_size,
+        )
+    elif checkpoint_family == "dyadic_dim":
+        results = predict_dyadic_dim(
+            args.seq_id,
+            args.checkpoint,
+            n_frames,
+            video_canvas_size=args.video_canvas_size,
+            n_heads=args.dyadic_n_heads,
+            dropout=args.dyadic_dropout,
+            video_chunk_size=args.dyadic_video_chunk_size,
         )
     elif checkpoint_family == "listenformer":
         results = predict_listenformer(

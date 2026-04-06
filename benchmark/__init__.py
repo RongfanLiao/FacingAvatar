@@ -47,3 +47,10 @@ from benchmark.listenformer import (  # noqa: F401
     train_listenformer,
     validate_listenformer,
 )
+from benchmark.dyadic_dim import (  # noqa: F401
+    DyadicContinuousTransformer,
+    DyadicContinuousTransformerLoss,
+    evaluate_dyadic_dim_metrics,
+    train_dyadic_dim,
+    validate_dyadic_dim,
+)
