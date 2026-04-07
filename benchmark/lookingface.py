@@ -9,6 +9,7 @@ import random
 import librosa
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
@@ -92,6 +93,41 @@ def _fit_frame_to_canvas(frame: np.ndarray, canvas_size: int = VIDEO_CANVAS_SIZE
     return _VIDEO_NORMALIZE(tensor)  # (3, H, W) in [-1, 1]
 
 
+def _fit_frames_to_canvas(frames: np.ndarray, canvas_size: int = VIDEO_CANVAS_SIZE) -> torch.Tensor:
+    """Fit a batch of RGB frames into a square canvas and normalize to [-1, 1].
+
+    Args:
+        frames: numpy array (T, H, W, 3) in uint8 RGB from decord.
+        canvas_size: target canvas side length.
+
+    Returns:
+        Tensor (T, 3, canvas_size, canvas_size) normalized to [-1, 1].
+    """
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(f"Expected frames with shape (T, H, W, 3), got {frames.shape}")
+
+    frame_count, height, width, _ = frames.shape
+    if frame_count == 0:
+        return torch.empty((0, 3, canvas_size, canvas_size), dtype=torch.float32)
+
+    scale = canvas_size / max(height, width)
+    new_height = max(int(round(height * scale)), 1)
+    new_width = max(int(round(width * scale)), 1)
+
+    frame_tensor = torch.from_numpy(frames).permute(0, 3, 1, 2).float() / 255.0
+    resized = F.interpolate(frame_tensor, size=(new_height, new_width), mode="bilinear", align_corners=False)
+
+    canvas = torch.full(
+        (frame_count, 3, canvas_size, canvas_size),
+        fill_value=128.0 / 255.0,
+        dtype=resized.dtype,
+    )
+    offset_y = (canvas_size - new_height) // 2
+    offset_x = (canvas_size - new_width) // 2
+    canvas[:, :, offset_y:offset_y + new_height, offset_x:offset_x + new_width] = resized
+    return _VIDEO_NORMALIZE(canvas)
+
+
 def _make_sample_record(seq_id: str, entry: dict[str, str]) -> dict[str, str | None]:
     return {
         "seq_id": seq_id,
@@ -108,9 +144,8 @@ def _make_sample_record(seq_id: str, entry: dict[str, str]) -> dict[str, str | N
 
 def discover_benchmark_sequences(
     seq_ids: list[str] | None = None,
-    require_left_audio: bool = True,
+    # require_left_audio: bool = True,
     require_left_video_embedding: bool = True,
-    require_right_video_embedding: bool = False,
     require_right_mp4: bool = True,
     require_flame_target: bool = True,
     require_wav2vec_audio: bool = False,
@@ -136,13 +171,11 @@ def discover_benchmark_sequences(
             continue
         if require_flame_target and not os.path.exists(sample["flame_npz"]):
             continue
-        if require_left_audio and not os.path.exists(sample["left_audio_emb"]):
-            continue
+        # if require_left_audio and not os.path.exists(sample["left_audio_emb"]):
+        #     continue
         if require_wav2vec_audio and not os.path.exists(sample["left_wav2vec_emb"]):
             continue
         if require_left_video_embedding and not os.path.exists(sample["left_video_emb"]):
-            continue
-        if require_right_video_embedding and not os.path.exists(sample["right_video_emb"]):
             continue
         valid.append(seq_id)
 
@@ -152,9 +185,8 @@ def discover_benchmark_sequences(
 def build_benchmark_split(
     split_path: str | None = None,
     seq_ids: list[str] | None = None,
-    require_left_audio: bool = True,
+    # require_left_audio: bool = True,
     require_left_video_embedding: bool = True,
-    require_right_video_embedding: bool = False,
     require_right_mp4: bool = True,
     require_flame_target: bool = True,
     require_wav2vec_audio: bool = False,
@@ -163,9 +195,8 @@ def build_benchmark_split(
     """Create a reproducible train/val split for paired LookingFace samples."""
     all_seqs = discover_benchmark_sequences(
         seq_ids=seq_ids,
-        require_left_audio=require_left_audio,
+        # require_left_audio=require_left_audio,
         require_left_video_embedding=require_left_video_embedding,
-        require_right_video_embedding=require_right_video_embedding,
         require_right_mp4=require_right_mp4,
         require_flame_target=require_flame_target,
         require_wav2vec_audio=require_wav2vec_audio,
@@ -234,7 +265,7 @@ def load_predefined_splits(
         # Filter to only seq_ids present in the manifest with required data
         valid_seq_ids = discover_benchmark_sequences(
             seq_ids=seq_ids,
-            require_left_audio=False,
+            # require_left_audio=False,
             require_left_video_embedding=False,
             require_wav2vec_audio=require_wav2vec_audio,
             require_right_mp4=require_right_mp4,
@@ -253,16 +284,15 @@ class LookingFaceBenchmarkDataset(Dataset):
     def __init__(
         self,
         seq_ids: list[str] | None = None,
-        load_left_audio: bool = True,
+        # load_left_audio: bool = True,
         load_left_video_embedding: bool = True,
-        load_right_video_embedding: bool = False,
         load_flame_target: bool = True,
         align_left_audio_to_flame: bool = True,
         include_motion58_target: bool = True,
         include_content_target: bool = True,
         require_right_mp4: bool = True,
         load_left_video_raw: bool = False,
-        load_wav2vec_audio: bool = False,
+        load_left_wav2vec_audio: bool = False,
         video_canvas_size: int = VIDEO_CANVAS_SIZE,
         manifest: dict[str, dict[str, str]] | None = None,
     ):
@@ -270,24 +300,22 @@ class LookingFaceBenchmarkDataset(Dataset):
             manifest = _get_manifest()
         discovered = discover_benchmark_sequences(
             seq_ids=seq_ids,
-            require_left_audio=load_left_audio,
+            # require_left_audio=load_left_audio,
             require_left_video_embedding=load_left_video_embedding,
-            require_right_video_embedding=load_right_video_embedding,
             require_right_mp4=require_right_mp4,
             require_flame_target=load_flame_target,
-            require_wav2vec_audio=load_wav2vec_audio,
+            require_wav2vec_audio=load_left_wav2vec_audio,
             manifest=manifest,
         )
         self.samples = [_make_sample_record(seq_id, manifest[seq_id]) for seq_id in discovered]
-        self.load_left_audio = load_left_audio
+        # self.load_left_audio = load_left_audio
         self.load_left_video_embedding = load_left_video_embedding
-        self.load_right_video_embedding = load_right_video_embedding
         self.load_flame_target = load_flame_target
         self.align_left_audio_to_flame = align_left_audio_to_flame
         self.include_motion58_target = include_motion58_target
         self.include_content_target = include_content_target
         self.load_left_video_raw = load_left_video_raw
-        self.load_wav2vec_audio = load_wav2vec_audio
+        self.load_left_wav2vec_audio = load_left_wav2vec_audio
         self.video_canvas_size = video_canvas_size
 
     def __len__(self) -> int:
@@ -313,19 +341,9 @@ class LookingFaceBenchmarkDataset(Dataset):
             if self.include_content_target:
                 item["flame_target_content"] = torch.from_numpy(targets["flame_target_content"]).float()
 
-        if self.load_left_audio:
-            audio_feat = np.load(sample["left_audio_emb"])
-            if self.align_left_audio_to_flame and n_frames is not None:
-                duration = _get_audio_duration(sample["seq_id"])
-                valid_frames = int(duration / WHISPER_CHUNK_SEC * WHISPER_MAX_FRAMES)
-                valid_frames = min(valid_frames, audio_feat.shape[0])
-                audio_feat = audio_feat[:valid_frames]
-                audio_feat = _interpolate_features(audio_feat, n_frames)
-            item["left_audio_feat"] = torch.from_numpy(np.asarray(audio_feat, dtype=np.float32)).float()
-
-        if self.load_wav2vec_audio:
+        if self.load_left_wav2vec_audio:
             wav2vec_feat = np.load(sample["left_wav2vec_emb"])
-            if self.align_left_audio_to_flame and n_frames is not None:
+            if self.align_left_audio_to_flame and n_frames != wav2vec_feat.shape[0]:
                 wav2vec_feat = _interpolate_features(wav2vec_feat, n_frames)
             item["left_audio_feat"] = torch.from_numpy(np.asarray(wav2vec_feat, dtype=np.float32)).float()
 
@@ -337,19 +355,16 @@ class LookingFaceBenchmarkDataset(Dataset):
                 indices = np.linspace(0, total_video_frames - 1, n_frames).astype(int).tolist()
             else:
                 indices = list(range(total_video_frames))
-            frames = []
-            for fi in indices:
-                frame_np = vr[fi].asnumpy()  # (H, W, 3) uint8 RGB
-                frames.append(_fit_frame_to_canvas(frame_np, self.video_canvas_size))
-            item["left_video_frames"] = torch.stack(frames)  # (T, 3, H, W)
+            frame_batch = vr.get_batch(indices).asnumpy()  # (T, H, W, 3) uint8 RGB
+            # frames = []
+            # for frame in frame_batch:
+                # frames.append(_fit_frame_to_canvas(frame, self.video_canvas_size))
+            # item["left_video_frames"] = frames    
+            item["left_video_frames"] = _fit_frames_to_canvas(frame_batch, self.video_canvas_size)
 
         if self.load_left_video_embedding:
             left_video_feat = np.load(sample["left_video_emb"])
             item["left_video_feat"] = torch.from_numpy(np.asarray(left_video_feat, dtype=np.float32)).float()
-
-        if self.load_right_video_embedding:
-            right_video_feat = np.load(sample["right_video_emb"])
-            item["right_video_feat"] = torch.from_numpy(np.asarray(right_video_feat, dtype=np.float32)).float()
 
         if n_frames is None:
             if "left_video_frames" in item:

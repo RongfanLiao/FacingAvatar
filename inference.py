@@ -22,7 +22,7 @@ from torch.nn.utils.rnn import pad_sequence
 from benchmark.lookingface import _fit_frame_to_canvas
 from benchmark.dualtalk import LookingFaceDualTalk
 from benchmark.dyadic_dim import DyadicContinuousTransformer
-from benchmark.motion_transvae import MotionOnlyTransformerVAE
+from benchmark.motion_transvae import MotionTransformerVAE
 from benchmark.listenformer import LookingFaceListenFormer
 from benchmark.regnn import LookingFaceREGNN
 from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
@@ -353,7 +353,7 @@ def predict_motion_transvae(
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     ckpt = _load_checkpoint(checkpoint, device)
     output_dim = int(ckpt["model_state_dict"]["decoder.output_head.weight"].shape[0])
-    model = MotionOnlyTransformerVAE(output_dim=output_dim).to(device)
+    model = MotionTransformerVAE(output_dim=output_dim).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 

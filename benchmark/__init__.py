@@ -21,7 +21,7 @@ from benchmark.targets import (  # noqa: F401
 )
 from benchmark.motion_transvae import (  # noqa: F401
     evaluate_motion_metrics,
-    MotionOnlyTransformerVAE,
+    MotionTransformerVAE,
     MotionVAELoss,
     train_motion_transvae,
     validate_motion_transvae,

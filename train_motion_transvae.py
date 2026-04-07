@@ -21,7 +21,7 @@ from benchmark.motion_transvae import (
     extract_checkpoint_metric,
     evaluate_motion_metrics,
     load_checkpoint,
-    MotionOnlyTransformerVAE,
+    MotionTransformerVAE,
     MotionVAELoss,
     resume_training_state,
     save_checkpoint,
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train motion-only TransVAE with raw video + wav2vec")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--feature_dim", type=int, default=128)
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--max_seq_len", type=int, default=1024)
@@ -71,8 +71,8 @@ def make_loader(
 ) -> DataLoader:
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
-        load_left_audio=False,
-        load_wav2vec_audio=True,
+        # load_left_audio=False,
+        load_left_wav2vec_audio=True,
         load_left_video_embedding=False,
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
@@ -147,7 +147,7 @@ def main() -> None:
 
     output_dim = FLAME_CONTENT_DIM if args.target_variant == "content" else FLAME_58_DIM
 
-    model = MotionOnlyTransformerVAE(
+    model = MotionTransformerVAE(
         audio_dim=WAV2VEC_DIM,
         output_dim=output_dim,
         feature_dim=args.feature_dim,
@@ -258,12 +258,12 @@ def main() -> None:
 
     metric_results = evaluate_motion_metrics(model, val_loader, device=device, target_variant=args.target_variant, use_amp=use_amp)
     metric_results["target_variant"] = args.target_variant
-    metric_results["evaluation_split"] = eval_label
-    metric_results.update({
-        f"{eval_label}_{key}": value
-        for key, value in list(metric_results.items())
-        if key not in {"target_variant", "evaluation_split"}
-    })
+    # metric_results["evaluation_split"] = eval_label
+    # metric_results.update({
+    #     f"{eval_label}_{key}": value
+    #     for key, value in list(metric_results.items())
+    #     if key not in {"target_variant", "evaluation_split"}
+    # })
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     with open(metric_path, "w") as f:

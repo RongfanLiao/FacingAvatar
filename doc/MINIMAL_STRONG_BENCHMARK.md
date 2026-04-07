@@ -1,4 +1,4 @@
-# Minimal Strong Benchmark for Reaction Head Avatars
+# Benchmark Metrics for Reaction Head Avatars
 
 ## 1. Purpose
 
@@ -6,18 +6,17 @@ This document defines a minimal but strong benchmark for evaluating reaction hea
 
 1. Is the predicted reaction motion correct?
 2. Does the reaction evolve naturally over time?
-3. Does the rendered output look visually plausible?
-4. Is the reaction semantically appropriate to the source content?
+3. Does the reaction preserve the right temporal behavior beyond framewise error?
+4. Does the whole motion trajectory stay behaviorally close to the paired target?
 
-The recommended minimal benchmark contains the following seven metrics:
+The recommended minimal benchmark contains the following six metrics:
 
-1. FD or MAE
+1. MAE
 2. RMSE
 3. FID△fm
 4. SND
-5. FVD
-6. LPIPS
-7. Ground-truth reaction embedding similarity
+5. frcorr
+6. frdist
 
 ## 2. Why These Metrics Form a Strong Minimal Set
 
@@ -25,23 +24,22 @@ This benchmark is intentionally small, but each metric covers a different failur
 
 | Metric | Main Question It Answers | Role |
 |---|---|---|
-| FD or MAE | Is the predicted FLAME motion close to the paired target? | Motion accuracy |
+| MAE | Is the predicted FLAME motion close to the paired target? | Motion accuracy |
 | RMSE | Are there large motion errors or unstable failures? | Motion robustness |
 | FID△fm | Are frame-to-frame motion changes realistic? | Temporal realism |
 | SND | Does the overall motion sequence look natural? | Sequence realism |
-| FVD | Does the rendered video behave like a real video? | Video realism |
-| LPIPS | Do rendered frames look perceptually similar to the reference? | Frame perceptual quality |
-| Ground-truth reaction embedding similarity | Is the generated reaction semantically close to the paired real reaction? | Semantic appropriateness |
+| frcorr | Does the predicted motion trajectory covary with the paired target? | Temporal agreement |
+| frdist | Is the predicted motion path close to the paired target even with timing offsets? | Trajectory alignment |
 
-Together, these metrics cover reconstruction quality, temporal behavior, rendered quality, and semantic appropriateness. That is enough to support a strong evaluation section without overloading the paper with metrics that answer unrelated questions such as lip-sync or identity preservation.
+Together, these metrics cover reconstruction quality, temporal behavior, and paired sequence agreement. That is enough to support a strong evaluation section without overloading the paper with metrics that answer unrelated questions such as lip-sync or identity preservation.
 
 ## 3. Metric Details
 
-### 3.1 FD or MAE
+### 3.1 MAE
 
 #### What it is
 
-FD in listener-generation papers is sometimes used loosely for a motion-space feature distance. In this repository, the most stable and interpretable version for a minimal benchmark is MAE, the mean absolute error between predicted and ground-truth FLAME parameters.
+MAE, the mean absolute error between predicted and ground-truth FLAME parameters.
 
 #### How it is computed
 
@@ -54,7 +52,7 @@ For each validation sequence:
    3. `rotation`
    4. `neck_pose`
    5. `eyes_pose`
-   6. `translation`
+   6. `translation` (not used in the training)
 3. Compute the element-wise absolute difference between prediction and ground truth.
 4. Average over valid frames and dimensions.
 
@@ -195,105 +193,76 @@ In practice for this repo, the important point is to compute SND over full FLAME
 1. Fine-grained semantic fit to the content
 2. Visual rendering quality
 
-### 3.5 FVD
+### 3.5 frcorr
 
 #### What it is
 
-FVD, or Fréchet Video Distance, is a realism metric computed on video features rather than static images. It compares distributions of generated videos and real videos, including temporal information.
+`frcorr` is a frame-sequence correlation score derived from the concordance correlation coefficient (CCC) between predicted and ground-truth motion trajectories.
 
 #### How it is computed
 
-1. Render the predicted FLAME outputs into videos.
-2. Collect the corresponding ground-truth rendered videos.
-3. Pass both sets of videos through a pretrained video feature extractor.
-4. Estimate the feature mean and covariance for generated and real videos.
-5. Compute the Fréchet distance between the two distributions.
+For each validation sequence:
 
-The form is analogous to FID, but the features come from videos rather than images.
-
-#### Why it is suitable
-
-1. It is the strongest single video-space realism metric in this minimal set.
-2. It reflects temporal behavior in the rendered domain.
-3. It is more suitable than frame-only metrics when the final artifact is a video.
-
-#### What it captures well
-
-1. Overall realism of rendered videos
-2. Temporal consistency in the visual domain
-3. Dataset-level video quality
-
-#### What it does not capture well
-
-1. Paired motion accuracy in FLAME space
-2. Whether a specific reaction is semantically appropriate to the source clip
-
-### 3.6 LPIPS
-
-#### What it is
-
-LPIPS is a perceptual image similarity metric based on deep visual features. It is designed to align better with human perception than simple pixel-wise scores such as PSNR.
-
-#### How it is computed
-
-1. Render predicted frames.
-2. Render or collect the paired ground-truth frames.
-3. Pass both through a pretrained perceptual network.
-4. Compute the distance between deep features at one or more layers.
-5. Average the distances across frames.
-
-#### Why it is suitable
-
-1. It is a stronger frame-level metric than SSIM or PSNR for perceptual quality.
-2. It helps show that the final visual output is not only numerically similar but visually plausible.
-3. It is a common complement to FVD in video-generation evaluation.
-
-#### What it captures well
-
-1. Perceptual frame similarity
-2. Appearance-level visual closeness
-
-#### What it does not capture well
-
-1. Sequence-level temporal realism
-2. Semantic appropriateness
-
-### 3.7 Ground-truth Reaction Embedding Similarity
-
-#### What it is
-
-This metric compares the generated reaction and the paired real reaction in a pretrained semantic embedding space, such as a facial-expression encoder, affect encoder, or video-level reaction encoder.
-
-#### How it is computed
-
-1. Choose a pretrained encoder that captures expression or affective behavior.
-2. Encode each generated reaction video or expression sequence into an embedding vector.
-3. Encode the paired ground-truth reaction in the same embedding space.
-4. Compute similarity, usually cosine similarity:
+1. Take the predicted FLAME sequence and the paired ground-truth FLAME sequence.
+2. For each output dimension, compute the concordance correlation coefficient:
 
 $$
-\operatorname{sim}(z_g, z_r) = \frac{z_g^\top z_r}{||z_g||\,||z_r||}
+\operatorname{CCC}(x, y) = \frac{2\rho\sigma_x\sigma_y}{\sigma_x^2 + \sigma_y^2 + (\mu_x - \mu_y)^2}
 $$
 
-5. Average the similarity over the evaluation set, or report retrieval-style ranking if you prefer a matching-based formulation.
+3. Average the per-dimension CCC values.
+4. Average the per-sequence results over the evaluation split.
 
 #### Why it is suitable
 
-1. It is the best automatic semantic metric for the current paired setup.
-2. It goes beyond low-level motion or image similarity and asks whether the generated reaction carries the same reaction meaning as the paired real one.
-3. It is more directly tied to the claim of appropriate response than MAE, RMSE, or FVD.
+1. It checks whether the predicted motion follows the same temporal trend as the paired target.
+2. It is stricter than simple correlation because it also penalizes mean and scale mismatch.
+3. It stays in FLAME space, which matches the model output space directly.
 
 #### What it captures well
 
-1. Semantic closeness of reactions
-2. Expression-level or affect-level similarity
-3. Appropriateness relative to the paired target reaction
+1. Temporal agreement with the paired target
+2. Whether rises and falls in motion happen in the right pattern
+3. Similarity of trajectory shape, mean, and variance
 
 #### What it does not capture well
 
-1. Low-level pixel accuracy
-2. Fine-grained physical correctness in FLAME space
-3. True human preference if the encoder is biased or limited
+1. Distribution-level realism across the whole dataset
+2. Large local misalignments that could still preserve broad trend agreement
+
+### 3.6 frdist
+
+#### What it is
+
+`frdist` is a trajectory-distance metric built from grouped Dynamic Time Warping (DTW) comparisons between predicted and ground-truth FLAME sequences.
+
+#### How it is computed
+
+For each validation sequence:
+
+1. Split the FLAME target into meaningful groups.
+2. For each group, compute a DTW distance between the predicted sequence and the paired ground-truth sequence.
+3. Weight the group distances and sum them.
+4. Average over the evaluation set.
+
+Conceptually, this measures the minimum alignment cost between two motion trajectories while allowing small timing shifts.
+
+#### Why it is suitable
+
+1. It captures path-level similarity rather than only framewise error.
+2. It is more tolerant to slight timing offsets than strict per-frame metrics.
+3. It is useful for motion sequences where two reactions may be similar but slightly phase-shifted in time.
+
+#### What it captures well
+
+1. Whole-trajectory alignment
+2. Similarity of motion paths even with mild timing mismatch
+3. Grouped motion closeness in expression and pose space
+
+#### What it does not capture well
+
+1. Whether the generated motion distribution looks realistic at the dataset level
+2. Visual realism of any rendered output
 
 ## 4. Why These Metrics Are Suitable for This Repository
 
@@ -301,69 +270,15 @@ This repository predicts FLAME parameters directly and only later converts them 
 
 1. First evaluate in FLAME space, because that is the model's native output space.
 2. Then evaluate temporal realism in FLAME space, because reaction quality depends strongly on dynamics.
-3. Then evaluate rendered videos, because the final artifact may still be shown visually.
-4. Finally, evaluate semantic appropriateness, because the core research claim is not only realism but reaction suitability to different content.
+3. Then evaluate paired trajectory agreement in FLAME space, because the task has paired supervision.
 
 The minimal benchmark follows exactly this logic:
 
 | Evaluation Need | Metric That Covers It |
 |---|---|
-| Paired motion correctness | FD or MAE, RMSE |
+| Paired motion correctness | MAE, RMSE |
 | Temporal naturalness | FID△fm, SND |
-| Rendered realism | FVD, LPIPS |
-| Semantic appropriateness | Ground-truth reaction embedding similarity |
+| Paired trajectory agreement | frcorr, frdist |
 
-This is why the benchmark is both minimal and strong. It does not waste space on metrics that are mainly about lip articulation, identity preservation, or unrelated synchrony definitions.
+This is why the benchmark is both minimal and strong. It does not waste space on metrics that are mainly about lip articulation, identity preservation, unrelated synchrony definitions, or rendering-heavy side tasks.
 
-## 5. Reporting Recommendations
-
-For a clean paper presentation, report the benchmark in four blocks.
-
-### 5.1 Motion Accuracy Block
-
-Report:
-
-1. FD or MAE
-2. RMSE
-3. Per-group scores for `expr`, `jaw_pose`, `rotation`, `neck_pose`, `eyes_pose`, and `translation`
-
-### 5.2 Temporal Realism Block
-
-Report:
-
-1. FID△fm
-2. SND
-
-### 5.3 Visual Quality Block
-
-Report:
-
-1. FVD
-2. LPIPS
-
-### 5.4 Semantic Appropriateness Block
-
-Report:
-
-1. Ground-truth reaction embedding similarity
-
-If possible, add a small human study to support this block.
-
-## 6. Final Recommendation
-
-If you can only afford one compact benchmark that still looks technically serious, use exactly this set:
-
-1. FD or MAE
-2. RMSE
-3. FID△fm
-4. SND
-5. FVD
-6. LPIPS
-7. Ground-truth reaction embedding similarity
-
-This set is strong because:
-
-1. it matches the model's actual output space
-2. it evaluates both framewise accuracy and temporal realism
-3. it includes rendered-video quality without letting rendering dominate the evaluation
-4. it adds one semantic metric so the benchmark speaks to reaction appropriateness rather than only reconstruction

@@ -199,7 +199,7 @@ class VideoEncoder(nn.Module):
     concatenates the results.
     """
 
-    def __init__(self, feature_dim: int = 128, chunk_size: int = 8):
+    def __init__(self, feature_dim: int = 128, chunk_size: int = 300):
         super().__init__()
         self.conv3d = ConvBlock(3, feature_dim)
         self.fc = nn.Linear(feature_dim, feature_dim)
@@ -304,7 +304,7 @@ class SpeakerContextEncoder(nn.Module):
         return fused
 
 
-class MotionOnlyTransformerVAE(nn.Module):
+class MotionTransformerVAE(nn.Module):
     """Motion-only port of baseline motion_transvae for LookingFace benchmarking.
 
     Uses BaselineSpeakerEncoder (Conv3D video + wav2vec audio, concat+linear fusion)

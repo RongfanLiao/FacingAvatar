@@ -98,7 +98,7 @@ def make_loader(
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
         load_left_audio=False,
-        load_wav2vec_audio=True,
+        load_left_wav2vec_audio=True,
         load_left_video_embedding=False,
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
