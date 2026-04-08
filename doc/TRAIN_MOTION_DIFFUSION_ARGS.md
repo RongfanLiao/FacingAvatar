@@ -53,6 +53,14 @@ This is used only when `--predefined_splits_dir` is not supplied.
 
 Useful for smoke tests or quick debugging runs.
 
+### `--max_eval_samples`
+
+- Type: `int`
+- Default: `None`
+- Meaning: limit the number of validation sequences used for evaluation and metric generation
+
+Useful when you want a faster validation pass or a small evaluation smoke test without reducing the training set.
+
 ### `--train_val_same`
 
 - Flag
@@ -267,6 +275,14 @@ Files typically written there:
 - `best.pt`
 - `last.pt`
 - `metrics.json`
+
+### `--resume_checkpoint`
+
+- Type: `str`
+- Default: `None`
+- Meaning: checkpoint path used to resume training state or to provide weights for `--eval_only`
+
+If supplied during training, the script restores the model and optimizer state and continues from the saved epoch. If supplied with `--eval_only`, the script evaluates that checkpoint directly.
 
 ## Validation cadence
 
