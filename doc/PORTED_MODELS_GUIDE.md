@@ -366,8 +366,8 @@ The current benchmark evaluation computes:
 2. `rmse`
 3. `frcorr`
 4. `frdist`
-5. `delta_mae`
-6. `delta_rmse`
+<!-- 5. `delta_mae` -->
+<!-- 6. `delta_rmse` -->
 7. `fid_delta_fm`
 8. `snd`
 

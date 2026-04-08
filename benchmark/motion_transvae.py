@@ -826,8 +826,8 @@ def evaluate_motion_metrics(
     if delta_pred_arr.shape[0] > 0 and delta_target_arr.shape[0] > 0:
         delta_abs = np.abs(delta_pred_arr - delta_target_arr)
         delta_sq = (delta_pred_arr - delta_target_arr) ** 2
-        metrics["delta_mae"] = float(delta_abs.mean())
-        metrics["delta_rmse"] = float(np.sqrt(delta_sq.mean()))
+        # metrics["delta_mae"] = float(delta_abs.mean())
+        # metrics["delta_rmse"] = float(np.sqrt(delta_sq.mean()))
         metrics["fid_delta_fm"] = _frechet_distance(delta_pred_arr, delta_target_arr)
     else:
         metrics["delta_mae"] = float("nan")

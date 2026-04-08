@@ -16,8 +16,8 @@ DEFAULT_METRICS = [
     "rmse",
     "frcorr",
     "frdist",
-    "delta_mae",
-    "delta_rmse",
+    # "delta_mae",
+    # "delta_rmse",
     "fid_delta_fm",
     "snd",
 ]
