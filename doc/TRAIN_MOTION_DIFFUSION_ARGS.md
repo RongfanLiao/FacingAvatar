@@ -22,7 +22,7 @@ python train_motion_diffusion.py \
   --checkpoint_dir checkpoints/motion_diffusion_lookingface \
   --epochs 10 \
   --batch_size 2 \
-  --val_period 2 \
+  --val_interval 2 \
   --video_canvas_size 400
 ```
 
@@ -270,13 +270,13 @@ Files typically written there:
 
 ## Validation cadence
 
-### `--val_period`
+### `--val_interval`
 
 - Type: `int`
 - Default: `5`
 - Meaning: run validation every N epochs
 
-If `--epochs 1`, set `--val_period 1` so validation and checkpoint writing happen.
+If `--epochs 1`, set `--val_interval 1` so validation and checkpoint writing happen.
 
 ## Logging behavior
 
@@ -306,7 +306,7 @@ python train_motion_diffusion.py \
   --batch_size 1 \
   --num_workers 0 \
   --log_interval 1 \
-  --val_period 1 \
+  --val_interval 1 \
   --video_canvas_size 224 \
   --feature_dim 64 \
   --n_heads 4 \
@@ -326,7 +326,7 @@ python train_motion_diffusion.py \
   --batch_size 1 \
   --num_workers 0 \
   --log_interval 1 \
-  --val_period 1 \
+  --val_interval 1 \
   --video_canvas_size 224 \
   --feature_dim 128 \
   --n_heads 4 \
@@ -345,7 +345,7 @@ python train_motion_diffusion.py \
   --epochs 100 \
   --batch_size 2 \
   --log_interval 10 \
-  --val_period 5 \
+  --val_interval 5 \
   --video_canvas_size 224 \
   --feature_dim 256 \
   --n_heads 8 \

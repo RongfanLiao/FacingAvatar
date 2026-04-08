@@ -31,7 +31,7 @@ from manifest import load_manifest
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the LookingFace motion_diffusion benchmark port")
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--val_period", type=int, default=5)
+    parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
@@ -191,7 +191,7 @@ def main() -> None:
                 f"train_vel={train_metrics['loss_vel']:.5f}"
             )
 
-            if epoch % args.val_period == 0:
+            if epoch % args.val_interval == 0:
                 val_metrics = validate_motion_diffusion(
                     model,
                     val_loader,

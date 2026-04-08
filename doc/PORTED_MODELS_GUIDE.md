@@ -441,7 +441,7 @@ Example smoke-test command:
 ```bash
 /home/r/rongfan/micromamba/envs/qwen_vl/bin/python train_motion_diffusion.py \
   --epochs 1 \
-  --val_period 1 \
+  --val_interval 1 \
   --batch_size 2 \
   --num_workers 0 \
   --feature_dim 64 \
