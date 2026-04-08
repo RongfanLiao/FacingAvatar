@@ -30,7 +30,6 @@ from config import (
     AUDIO_EMB_DIR, VIDEO_EMB_DIR,
     WAV2VEC_EMB_DIR, WHISPER_MAX_FRAMES, WHISPER_CHUNK_SEC, CKPT_DIR, DEVICE,
 )
-from model import AudioVisualFLAMEModel
 from dataset import _get_audio_duration, _interpolate_features, FLAME_KEYS
 from manifest import load_manifest
 from decord import VideoReader, cpu as decord_cpu
@@ -277,71 +276,6 @@ def _motion_prediction_to_flame(prediction: np.ndarray, label_npz: np.lib.npyio.
         return results
 
     raise RuntimeError(f"Unsupported motion TransVAE output dim: {output_dim}")
-
-
-def predict(seq_id: str, checkpoint: str, n_frames: int | None = None) -> dict[str, np.ndarray]:
-    """
-    Predict FLAME parameters for a given sequence.
-
-    Args:
-        seq_id: Sequence ID (e.g. "2920")
-        checkpoint: Path to model checkpoint
-        n_frames: Number of output frames. If None, inferred from audio duration
-                  assuming ~25 fps.
-    """
-    # Load embeddings
-    audio_path = os.path.join(AUDIO_EMB_DIR, f"{seq_id}_left_whisper.npy")
-    video_path = os.path.join(VIDEO_EMB_DIR, f"{seq_id}_left.npy")
-
-    audio_emb = np.load(audio_path)   # (1500, 1280)
-    video_emb = np.load(video_path)   # (3584,)
-
-    # Temporal alignment
-    duration = _get_audio_duration(seq_id)
-    valid_frames = int(duration / WHISPER_CHUNK_SEC * WHISPER_MAX_FRAMES)
-    valid_frames = min(valid_frames, audio_emb.shape[0])
-    audio_cropped = audio_emb[:valid_frames]
-
-    if n_frames is None:
-        n_frames = int(duration * 25)  # assume ~25 fps
-
-    audio_aligned = _interpolate_features(audio_cropped, n_frames)  # (n_frames, 1280)
-
-    # Load model
-    model = AudioVisualFLAMEModel().to(DEVICE)
-    ckpt = _load_checkpoint(checkpoint, DEVICE)
-    load_res = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    missing = set(load_res.missing_keys)
-    unexpected = set(load_res.unexpected_keys)
-    allowed_missing = {
-        "flame_head.trans_head.weight",
-        "flame_head.trans_head.bias",
-    }
-    if unexpected or not missing.issubset(allowed_missing):
-        raise RuntimeError(
-            "Checkpoint/model mismatch. "
-            f"missing_keys={sorted(missing)} unexpected_keys={sorted(unexpected)}"
-        )
-    if missing:
-        print(
-            "Warning: checkpoint does not contain translation head weights; "
-            "using initialized translation head for inference."
-        )
-    model.eval()
-
-    # Predict
-    audio_t = torch.from_numpy(audio_aligned).float().unsqueeze(0).to(DEVICE)  # (1, N, 1280)
-    video_t = torch.from_numpy(video_emb).float().unsqueeze(0).to(DEVICE)      # (1, 3584)
-
-    with torch.no_grad():
-        preds = model(audio_t, video_t)
-
-    # Convert to numpy
-    results = {}
-    for key in FLAME_KEYS:
-        results[key] = preds[key].squeeze(0).cpu().numpy()  # (N, dim)
-
-    return results
 
 
 def predict_motion_transvae(
@@ -601,9 +535,9 @@ def main():
     parser.add_argument("--seq_id", type=str, required=True, help="Sequence ID (e.g. 2920)")
     parser.add_argument("--checkpoint", type=str, default=os.path.join(CKPT_DIR, "best_model.pt"))
     parser.add_argument("--n_frames", type=int, default=None, help="Number of output frames (default: auto from duration)")
-    parser.add_argument("--output_dir", type=str, default="output/predicted", help="Output directory")
+    parser.add_argument("--output_dir", type=str, default="work_dir/predicted", help="Output directory")
     parser.add_argument("--gen_vis", action="store_true", help="Pack output into a per-sequence dir with foreground_image.png and transforms.json for visualization")
-    parser.add_argument("--smooth", type=int, default=0, help="Temporal smoothing window size (0=disabled)")
+    parser.add_argument("--smooth", type=int, default=5, help="Temporal smoothing window size (0=disabled)")
     parser.add_argument("--video_canvas_size", type=int, default=400, help="Canvas size for motion TransVAE raw-frame inference")
     parser.add_argument("--dyadic_n_heads", type=int, default=8, help="Dyadic ContinuousTransformer attention head count used when reconstructing the model for inference")
     parser.add_argument("--dyadic_dropout", type=float, default=0.1, help="Dyadic ContinuousTransformer dropout used when reconstructing the model for inference")
