@@ -8,3 +8,4 @@ LookingFace
 slurm-*.out
 /checkpoints
 /doc/explanation/
+/work_dir
