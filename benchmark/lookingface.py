@@ -284,7 +284,6 @@ class LookingFaceBenchmarkDataset(Dataset):
     def __init__(
         self,
         seq_ids: list[str] | None = None,
-        # load_left_audio: bool = True,
         load_left_video_embedding: bool = True,
         load_flame_target: bool = True,
         align_left_audio_to_flame: bool = True,
@@ -299,7 +298,6 @@ class LookingFaceBenchmarkDataset(Dataset):
             manifest = _get_manifest()
         discovered = discover_benchmark_sequences(
             seq_ids=seq_ids,
-            # require_left_audio=load_left_audio,
             require_left_video_embedding=load_left_video_embedding,
             require_right_mp4=require_right_mp4,
             require_flame_target=load_flame_target,
@@ -307,7 +305,6 @@ class LookingFaceBenchmarkDataset(Dataset):
             manifest=manifest,
         )
         self.samples = [_make_sample_record(seq_id, manifest[seq_id]) for seq_id in discovered]
-        # self.load_left_audio = load_left_audio
         self.load_left_video_embedding = load_left_video_embedding
         self.load_flame_target = load_flame_target
         self.align_left_audio_to_flame = align_left_audio_to_flame
