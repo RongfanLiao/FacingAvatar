@@ -228,22 +228,7 @@ This matches the baseline REGNN setup. During training, the loader builds a fixe
 
 In the current raw-video REGNN path, the perceptual stage uses the baseline-style speaker encoder and this argument does not materially change behavior.
 
-### `--target_variant`
-
-- Choices: `content`, `motion58`
-- Default: `content`
-- Meaning: which FLAME target representation REGNN predicts
-
-`content`:
-
-- predicts the reduced FLAME content target used by this repo
-- shape is currently 112 per frame
-
-`motion58`:
-
-- predicts the reduced 58-d motion target
-
-Use `content` unless you are explicitly benchmarking the 58-d representation.
+The current REGNN benchmark path predicts the repository's 112-d FLAME content target.
 
 ## REGNN objective args
 

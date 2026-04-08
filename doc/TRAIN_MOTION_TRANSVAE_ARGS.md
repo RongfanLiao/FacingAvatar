@@ -92,23 +92,7 @@ Behavior:
 - if `--resume_checkpoint` is provided, that checkpoint is loaded for evaluation
 - otherwise, if `best.pt` exists under `--checkpoint_dir`, that checkpoint is used
 
-### `--target_variant`
-
-- Choices: `content`, `motion58`
-- Default: `content`
-- Meaning: which reduced FLAME target the model predicts
-
-`content`:
-
-- predicts the repo's expression-focused target
-- current dimensionality is 112 per frame
-
-`motion58`:
-
-- predicts the REACT-style reduced motion target
-- current dimensionality is 58 per frame
-
-Use `content` unless you specifically want the reduced motion benchmark.
+The current TransVAE benchmark path predicts the repository's 112-d FLAME content target.
 
 ### `--video_canvas_size`
 

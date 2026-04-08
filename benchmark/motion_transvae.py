@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from benchmark.targets import FLAME_CONTENT_DIM
 from config import VIDEO_CANVAS_SIZE, WAV2VEC_DIM
 
 
@@ -110,9 +110,9 @@ class LatentVAE(nn.Module):
 
 
 class MotionDecoder(nn.Module):
-    """Transformer decoder that predicts reduced 58-d motion targets."""
+    """Transformer decoder that predicts FLAME content targets."""
 
-    def __init__(self, output_dim: int = FLAME_58_DIM, feature_dim: int = 128, n_head: int = 4, max_seq_len: int = 1024):
+    def __init__(self, output_dim: int = FLAME_CONTENT_DIM, feature_dim: int = 128, n_head: int = 4, max_seq_len: int = 1024):
         super().__init__()
         self.output_dim = output_dim
         self.feature_dim = feature_dim
@@ -347,16 +347,13 @@ class MotionTransformerVAE(nn.Module):
 
 @dataclass
 class MotionVAELoss:
-    """Masked reconstruction plus KL loss for motion target variants."""
+    """Masked reconstruction plus KL loss for FLAME content targets."""
 
     kl_p: float = 1e-5
     w_exp: float = 2.0
     w_jaw: float = 2.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
-    w_rot: float = 4.0
-    w_tran: float = 4.0
-    target_variant: str = "content"
 
     def __call__(
         self,
@@ -372,35 +369,22 @@ class MotionVAELoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        if self.target_variant == "motion58":
-            exp_loss = masked_mean(mse[:, :, :52])
-            rot_loss = masked_mean(mse[:, :, 52:55])
-            tran_loss = masked_mean(mse[:, :, 55:58])
-            rec_loss = self.w_exp * exp_loss + self.w_rot * rot_loss + self.w_tran * tran_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_rot": float(rot_loss.item()),
-                "loss_tran": float(tran_loss.item()),
-            }
-        elif self.target_variant == "content":
-            exp_loss = masked_mean(mse[:, :, :100])
-            jaw_loss = masked_mean(mse[:, :, 100:103])
-            neck_loss = masked_mean(mse[:, :, 103:106])
-            eyes_loss = masked_mean(mse[:, :, 106:112])
-            rec_loss = (
-                self.w_exp * exp_loss
-                + self.w_jaw * jaw_loss
-                + self.w_neck * neck_loss
-                + self.w_eyes * eyes_loss
-            )
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_jaw": float(jaw_loss.item()),
-                "loss_neck": float(neck_loss.item()),
-                "loss_eyes": float(eyes_loss.item()),
-            }
-        else:
-            raise ValueError(f"Unsupported target_variant: {self.target_variant}")
+        exp_loss = masked_mean(mse[:, :, :100])
+        jaw_loss = masked_mean(mse[:, :, 100:103])
+        neck_loss = masked_mean(mse[:, :, 103:106])
+        eyes_loss = masked_mean(mse[:, :, 106:112])
+        rec_loss = (
+            self.w_exp * exp_loss
+            + self.w_jaw * jaw_loss
+            + self.w_neck * neck_loss
+            + self.w_eyes * eyes_loss
+        )
+        component_logs = {
+            "loss_exp": float(exp_loss.item()),
+            "loss_jaw": float(jaw_loss.item()),
+            "loss_neck": float(neck_loss.item()),
+            "loss_eyes": float(eyes_loss.item()),
+        }
 
         mu_ref = torch.zeros_like(distribution.loc)
         scale_ref = torch.ones_like(distribution.scale)
@@ -490,8 +474,7 @@ def train_motion_transvae(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
-        target_key = "flame_target_58" if criterion.target_variant == "motion58" else "flame_target_content"
-        target = batch[target_key].to(device)
+        target = batch["flame_target_content"].to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -556,8 +539,7 @@ def validate_motion_transvae(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
-        target_key = "flame_target_58" if criterion.target_variant == "motion58" else "flame_target_content"
-        target = batch[target_key].to(device)
+        target = batch["flame_target_content"].to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -700,7 +682,6 @@ def evaluate_motion_metrics(
     model,
     loader,
     device,
-    target_variant: str = "content",
     use_amp: bool = False,
     eval_label: str = "val",
     log_interval: int = 1,
@@ -719,16 +700,9 @@ def evaluate_motion_metrics(
     evaluated_sequences = 0
     evaluated_frames = 0
 
-    if target_variant == "motion58":
-        target_key = "flame_target_58"
-        feature_dim = FLAME_58_DIM
-        frd_func = _motion_frd
-    elif target_variant == "content":
-        target_key = "flame_target_content"
-        feature_dim = FLAME_CONTENT_DIM
-        frd_func = _content_frd
-    else:
-        raise ValueError(f"Unsupported target_variant: {target_variant}")
+    target_key = "flame_target_content"
+    feature_dim = FLAME_CONTENT_DIM
+    frd_func = _content_frd
 
     total_batches = len(loader)
     eval_start_time = time.perf_counter()
@@ -802,26 +776,16 @@ def evaluate_motion_metrics(
         "frdist": float(np.mean(frd_list)),
     }
 
-    if target_variant == "motion58":
-        metrics.update({
-            "mae_expr": float(abs_errors_arr[:, :52].mean()),
-            "mae_rot": float(abs_errors_arr[:, 52:55].mean()),
-            "mae_tran": float(abs_errors_arr[:, 55:58].mean()),
-            "rmse_expr": float(np.sqrt(sq_errors_arr[:, :52].mean())),
-            "rmse_rot": float(np.sqrt(sq_errors_arr[:, 52:55].mean())),
-            "rmse_tran": float(np.sqrt(sq_errors_arr[:, 55:58].mean())),
-        })
-    else:
-        metrics.update({
-            "mae_expr": float(abs_errors_arr[:, :100].mean()),
-            "mae_jaw": float(abs_errors_arr[:, 100:103].mean()),
-            "mae_neck": float(abs_errors_arr[:, 103:106].mean()),
-            "mae_eyes": float(abs_errors_arr[:, 106:112].mean()),
-            "rmse_expr": float(np.sqrt(sq_errors_arr[:, :100].mean())),
-            "rmse_jaw": float(np.sqrt(sq_errors_arr[:, 100:103].mean())),
-            "rmse_neck": float(np.sqrt(sq_errors_arr[:, 103:106].mean())),
-            "rmse_eyes": float(np.sqrt(sq_errors_arr[:, 106:112].mean())),
-        })
+    metrics.update({
+        "mae_expr": float(abs_errors_arr[:, :100].mean()),
+        "mae_jaw": float(abs_errors_arr[:, 100:103].mean()),
+        "mae_neck": float(abs_errors_arr[:, 103:106].mean()),
+        "mae_eyes": float(abs_errors_arr[:, 106:112].mean()),
+        "rmse_expr": float(np.sqrt(sq_errors_arr[:, :100].mean())),
+        "rmse_jaw": float(np.sqrt(sq_errors_arr[:, 100:103].mean())),
+        "rmse_neck": float(np.sqrt(sq_errors_arr[:, 103:106].mean())),
+        "rmse_eyes": float(np.sqrt(sq_errors_arr[:, 106:112].mean())),
+    })
 
     if delta_pred_arr.shape[0] > 0 and delta_target_arr.shape[0] > 0:
         delta_abs = np.abs(delta_pred_arr - delta_target_arr)

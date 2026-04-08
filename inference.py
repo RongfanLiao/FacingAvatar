@@ -25,7 +25,7 @@ from benchmark.dyadic_dim import DyadicContinuousTransformer
 from benchmark.motion_transvae import MotionTransformerVAE
 from benchmark.listenformer import LookingFaceListenFormer
 from benchmark.regnn import LookingFaceREGNN
-from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from benchmark.targets import FLAME_CONTENT_DIM
 from config import (
     AUDIO_EMB_DIR, VIDEO_EMB_DIR,
     WAV2VEC_EMB_DIR, WHISPER_MAX_FRAMES, WHISPER_CHUNK_SEC, CKPT_DIR, DEVICE,
@@ -87,7 +87,7 @@ def _infer_listenformer_config(checkpoint_state: dict[str, torch.Tensor]) -> dic
     }
 
 
-def _infer_dyadic_dim_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int | str]:
+def _infer_dyadic_dim_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int]:
     feature_dim = int(checkpoint_state["context_encoder.audio_feature_map.weight"].shape[0])
     audio_dim = int(checkpoint_state["context_encoder.audio_feature_map.weight"].shape[1])
     output_dim = int(checkpoint_state["output_head.3.weight"].shape[0])
@@ -107,11 +107,7 @@ def _infer_dyadic_dim_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[
     }
     num_encoder_layers = max(encoder_layer_indices) + 1 if encoder_layer_indices else 6
     num_decoder_layers = max(decoder_layer_indices) + 1 if decoder_layer_indices else 6
-    if output_dim == FLAME_CONTENT_DIM:
-        target_variant = "content"
-    elif output_dim == FLAME_58_DIM:
-        target_variant = "motion58"
-    else:
+    if output_dim != FLAME_CONTENT_DIM:
         raise RuntimeError(f"Unsupported Dyadic DIM output dim: {output_dim}")
     return {
         "feature_dim": feature_dim,
@@ -119,7 +115,6 @@ def _infer_dyadic_dim_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[
         "output_dim": output_dim,
         "num_encoder_layers": num_encoder_layers,
         "num_decoder_layers": num_decoder_layers,
-        "target_variant": target_variant,
     }
 
 
@@ -193,7 +188,7 @@ def _resolve_dualtalk_config(ckpt: dict[str, object], state_dict: dict[str, torc
     }
 
 
-def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int | str]:
+def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int]:
     fused_dim = int(checkpoint_state["perceptual_processor.encoder.audio_feature_map.weight"].shape[0])
     audio_dim = int(checkpoint_state["perceptual_processor.encoder.audio_feature_map.weight"].shape[1])
     num_frames = int(checkpoint_state["cognitive_processor.convert_layer.weight1"].shape[0])
@@ -208,11 +203,7 @@ def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, 
         if len(parts) > 3 and parts[2].isdigit()
     }
     layers = max(layer_indices) + 1 if layer_indices else 2
-    if target_dim == FLAME_CONTENT_DIM:
-        target_variant = "content"
-    elif target_dim == FLAME_58_DIM:
-        target_variant = "motion58"
-    else:
+    if target_dim != FLAME_CONTENT_DIM:
         raise RuntimeError(f"Unsupported REGNN target dim: {target_dim}")
 
     return {
@@ -221,7 +212,6 @@ def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, 
         "num_frames": num_frames,
         "edge_dim": edge_dim,
         "layers": layers,
-        "target_variant": target_variant,
     }
 
 
@@ -260,22 +250,14 @@ def _build_motion_transvae_inputs(seq_id: str, n_frames: int, video_canvas_size:
 def _motion_prediction_to_flame(prediction: np.ndarray, label_npz: np.lib.npyio.NpzFile, output_dim: int) -> dict[str, np.ndarray]:
     results = {key: np.asarray(label_npz[key]) for key in label_npz.files}
 
-    if output_dim == FLAME_CONTENT_DIM:
-        results["expr"] = prediction[:, :100]
-        results["jaw_pose"] = prediction[:, 100:103]
-        results["neck_pose"] = prediction[:, 103:106]
-        results["eyes_pose"] = prediction[:, 106:112]
-        return results
+    if output_dim != FLAME_CONTENT_DIM:
+        raise RuntimeError(f"Unsupported motion prediction output dim: {output_dim}")
 
-    if output_dim == FLAME_58_DIM:
-        expr = np.asarray(label_npz["expr"]).copy()
-        expr[:, :52] = prediction[:, :52]
-        results["expr"] = expr
-        results["rotation"] = prediction[:, 52:55]
-        results["translation"] = prediction[:, 55:58]
-        return results
-
-    raise RuntimeError(f"Unsupported motion TransVAE output dim: {output_dim}")
+    results["expr"] = prediction[:, :100]
+    results["jaw_pose"] = prediction[:, 100:103]
+    results["neck_pose"] = prediction[:, 103:106]
+    results["eyes_pose"] = prediction[:, 106:112]
+    return results
 
 
 def predict_motion_transvae(
@@ -323,13 +305,11 @@ def predict_regnn(
     ckpt = _load_checkpoint(checkpoint, device)
     state_dict = ckpt["model_state_dict"]
     regnn_config = _infer_regnn_config(state_dict)
-    target_variant = str(regnn_config["target_variant"])
-    target_dim = FLAME_CONTENT_DIM if target_variant == "content" else FLAME_58_DIM
+    target_dim = FLAME_CONTENT_DIM
 
     model = LookingFaceREGNN(
         audio_dim=int(regnn_config["audio_dim"]),
         fused_dim=int(regnn_config["fused_dim"]),
-        target_variant=target_variant,
         num_frames=int(regnn_config["num_frames"]),
         edge_dim=int(regnn_config["edge_dim"]),
         neighbors=neighbors,
@@ -351,7 +331,6 @@ def predict_regnn(
                 left_audio_feat=audio_t,
                 left_video=video_t,
                 lengths=lengths,
-                target_variant=target_variant,
             )
 
     pred_np = prediction[0, :n_frames].detach().cpu().numpy().astype(np.float32)
@@ -432,12 +411,10 @@ def predict_dyadic_dim(
     ckpt = _load_checkpoint(checkpoint, device)
     state_dict = ckpt["model_state_dict"]
     dyadic_config = _infer_dyadic_dim_config(state_dict)
-    target_variant = str(dyadic_config["target_variant"])
     output_dim = int(dyadic_config["output_dim"])
 
     model = DyadicContinuousTransformer(
         audio_dim=int(dyadic_config["audio_dim"]),
-        target_variant=target_variant,
         feature_dim=int(dyadic_config["feature_dim"]),
         n_heads=n_heads,
         num_encoder_layers=int(dyadic_config["num_encoder_layers"]),
@@ -616,7 +593,9 @@ def main():
             noise_threshold=(args.regnn_noise_threshold if args.regnn_noise_threshold > 0 else None),
         )
     else:
-        results = predict(args.seq_id, args.checkpoint, n_frames)
+        raise RuntimeError(
+            f"Checkpoint family {checkpoint_family!r} is not supported by the current inference entrypoint"
+        )
 
     # Optional temporal smoothing on predicted params
     if args.smooth > 0:

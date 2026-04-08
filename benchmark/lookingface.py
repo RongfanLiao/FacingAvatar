@@ -288,7 +288,6 @@ class LookingFaceBenchmarkDataset(Dataset):
         load_left_video_embedding: bool = True,
         load_flame_target: bool = True,
         align_left_audio_to_flame: bool = True,
-        include_motion58_target: bool = True,
         include_content_target: bool = True,
         require_right_mp4: bool = True,
         load_left_video_raw: bool = False,
@@ -312,7 +311,6 @@ class LookingFaceBenchmarkDataset(Dataset):
         self.load_left_video_embedding = load_left_video_embedding
         self.load_flame_target = load_flame_target
         self.align_left_audio_to_flame = align_left_audio_to_flame
-        self.include_motion58_target = include_motion58_target
         self.include_content_target = include_content_target
         self.load_left_video_raw = load_left_video_raw
         self.load_left_wav2vec_audio = load_left_wav2vec_audio
@@ -336,8 +334,6 @@ class LookingFaceBenchmarkDataset(Dataset):
             flame_target_118 = targets["flame_target_118"]
             n_frames = flame_target_118.shape[0]
             item["flame_target_118"] = torch.from_numpy(flame_target_118).float()
-            if self.include_motion58_target:
-                item["flame_target_58"] = torch.from_numpy(targets["flame_target_58"]).float()
             if self.include_content_target:
                 item["flame_target_content"] = torch.from_numpy(targets["flame_target_content"]).float()
 
@@ -389,7 +385,7 @@ def collate_benchmark_batch(batch: list[dict[str, object]]) -> dict[str, object]
     lengths = torch.tensor([int(item["n_frames"]) for item in batch], dtype=torch.long)
     collated["lengths"] = lengths
 
-    temporal_keys = ["left_audio_feat", "left_video_frames", "flame_target_118", "flame_target_58", "flame_target_content"]
+    temporal_keys = ["left_audio_feat", "left_video_frames", "flame_target_118", "flame_target_content"]
     for key in temporal_keys:
         if key in batch[0]:
             padded = pad_sequence([item[key] for item in batch], batch_first=True)

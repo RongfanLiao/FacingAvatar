@@ -11,11 +11,8 @@ from benchmark.targets import (  # noqa: F401
     FLAME_118_KEYS,
     FLAME_CONTENT_DIM,
     FLAME_CONTENT_KEYS,
-    FLAME_58_DIM,
-    FLAME_58_KEYS,
     flame_dict_to_118,
     flame_dict_to_content,
-    flame_dict_to_motion58,
     flame_118_to_content,
     flame_npz_to_targets,
 )

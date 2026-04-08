@@ -139,11 +139,7 @@ Recommended starting values:
 
 ## Model args
 
-### `--target_variant`
-
-- Choices: `content`, `motion58`
-- Default: `content`
-- Meaning: which FLAME target representation the Dyadic port predicts
+The current Dyadic ContinuousTransformer benchmark path predicts the repository's 112-d FLAME content target.
 
 ### `--feature_dim`
 

@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from benchmark.motion_transvae import BaselineSpeakerEncoder, evaluate_motion_metrics
-from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from benchmark.targets import FLAME_CONTENT_DIM
 from config import WAV2VEC_DIM
 
 
@@ -264,7 +264,6 @@ class LookingFaceREGNN(nn.Module):
         self,
         audio_dim: int = WAV2VEC_DIM,
         fused_dim: int = 64,
-        target_variant: str = "content",
         num_frames: int = 50,
         edge_dim: int = 8,
         neighbors: int = 6,
@@ -274,13 +273,7 @@ class LookingFaceREGNN(nn.Module):
         noise_threshold: float | None = None,
     ):
         super().__init__()
-        if target_variant == "content":
-            self.target_dim = FLAME_CONTENT_DIM
-        elif target_variant == "motion58":
-            self.target_dim = FLAME_58_DIM
-        else:
-            raise ValueError(f"Unsupported target_variant: {target_variant}")
-        self.target_variant = target_variant
+        self.target_dim = FLAME_CONTENT_DIM
         self.num_frames = num_frames
         self.noise_threshold = noise_threshold
         self.perceptual_processor = LookingFacePercepProcessor(audio_dim=audio_dim, fused_dim=fused_dim, dropout=dropout)
@@ -344,9 +337,7 @@ class LookingFaceREGNN(nn.Module):
         left_audio_feat: torch.Tensor,
         left_video: torch.Tensor,
         lengths: torch.Tensor,
-        target_variant: str,
     ) -> torch.Tensor:
-        del target_variant
         predictions = []
         for batch_idx, length in enumerate(lengths.tolist()):
             seq_preds = []
@@ -391,13 +382,12 @@ class LookingFaceREGNN(nn.Module):
         return torch.stack(padded, dim=0)
 
 
-def _resolve_target(batch: dict[str, torch.Tensor], target_variant: str) -> torch.Tensor:
-    return batch["flame_target_58"] if target_variant == "motion58" else batch["flame_target_content"]
+def _resolve_target(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    return batch["flame_target_content"]
 
 
 def build_regnn_clips(
     batch: dict[str, torch.Tensor],
-    target_variant: str,
     num_frames: int,
     random_start: bool,
 ) -> dict[str, torch.Tensor]:
@@ -406,7 +396,7 @@ def build_regnn_clips(
     left_video = batch.get("left_video_frames", batch.get("left_video_feat"))
     if left_video is None:
         raise KeyError("REGNN expects left_video_frames or left_video_feat in the batch")
-    target = _resolve_target(batch, target_variant)
+    target = _resolve_target(batch)
     lengths = batch["lengths"]
 
     audio_clips = []
@@ -462,7 +452,6 @@ def build_regnn_clips(
 class REGNNLoss:
     """Baseline-shaped REGNN objective with latent matching as the primary loss."""
 
-    target_variant: str = "content"
     neighbor_pattern: str = "all"
     threshold: float | None = None
     use_mid_loss: bool = True
@@ -475,8 +464,6 @@ class REGNNLoss:
     w_jaw: float = 2.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
-    w_rot: float = 4.0
-    w_tran: float = 4.0
 
     def _all_thre_mse_loss(
         self,
@@ -516,28 +503,17 @@ class REGNNLoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        if self.target_variant == "motion58":
-            exp_loss = masked_mean(sq_error[:, :, :52])
-            rot_loss = masked_mean(sq_error[:, :, 52:55])
-            tran_loss = masked_mean(sq_error[:, :, 55:58])
-            rec_loss = self.w_exp * exp_loss + self.w_rot * rot_loss + self.w_tran * tran_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_rot": float(rot_loss.item()),
-                "loss_tran": float(tran_loss.item()),
-            }
-        else:
-            exp_loss = masked_mean(sq_error[:, :, :100])
-            jaw_loss = masked_mean(sq_error[:, :, 100:103])
-            neck_loss = masked_mean(sq_error[:, :, 103:106])
-            eyes_loss = masked_mean(sq_error[:, :, 106:112])
-            rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_jaw": float(jaw_loss.item()),
-                "loss_neck": float(neck_loss.item()),
-                "loss_eyes": float(eyes_loss.item()),
-            }
+        exp_loss = masked_mean(sq_error[:, :, :100])
+        jaw_loss = masked_mean(sq_error[:, :, 100:103])
+        neck_loss = masked_mean(sq_error[:, :, 103:106])
+        eyes_loss = masked_mean(sq_error[:, :, 106:112])
+        rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
+        component_logs = {
+            "loss_exp": float(exp_loss.item()),
+            "loss_jaw": float(jaw_loss.item()),
+            "loss_neck": float(neck_loss.item()),
+            "loss_eyes": float(eyes_loss.item()),
+        }
 
         return rec_loss, component_logs
 
@@ -610,7 +586,7 @@ def train_regnn(
     epoch_start_time = time.perf_counter()
 
     for batch_idx, batch in enumerate(loader, start=1):
-        clip_batch = build_regnn_clips(batch, criterion.target_variant, num_frames=model.num_frames, random_start=True)
+        clip_batch = build_regnn_clips(batch, num_frames=model.num_frames, random_start=True)
         left_audio = clip_batch["left_audio_clip"].to(device)
         left_video = clip_batch["left_video_clip"].to(device)
         target = clip_batch["target_clip"].to(device)
@@ -662,7 +638,7 @@ def validate_regnn(
     eval_start_time = time.perf_counter()
 
     for batch_idx, batch in enumerate(loader, start=1):
-        clip_batch = build_regnn_clips(batch, criterion.target_variant, num_frames=model.num_frames, random_start=False)
+        clip_batch = build_regnn_clips(batch, num_frames=model.num_frames, random_start=False)
         left_audio = clip_batch["left_audio_clip"].to(device)
         left_video = clip_batch["left_video_clip"].to(device)
         target = clip_batch["target_clip"].to(device)
@@ -694,19 +670,17 @@ def evaluate_regnn_metrics(
     model: LookingFaceREGNN,
     loader,
     device: torch.device,
-    target_variant: str = "content",
 ) -> dict[str, float]:
     """Run shared motion metrics on full-sequence REGNN predictions."""
 
     class _REGNNWrapper(nn.Module):
-        def __init__(self, inner: LookingFaceREGNN, variant: str):
+        def __init__(self, inner: LookingFaceREGNN):
             super().__init__()
             self.inner = inner
-            self.variant = variant
 
         def forward(self, left_audio_feat, left_video_feat, lengths, padding_mask=None):
             del padding_mask
-            prediction = self.inner.predict_sequence(left_audio_feat, left_video_feat, lengths, target_variant=self.variant)
+            prediction = self.inner.predict_sequence(left_audio_feat, left_video_feat, lengths)
             return prediction, None
 
-    return evaluate_motion_metrics(_REGNNWrapper(model, target_variant), loader, device=device, target_variant=target_variant)
+    return evaluate_motion_metrics(_REGNNWrapper(model), loader, device=device)

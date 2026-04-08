@@ -52,7 +52,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split_path", default=default_benchmark_split_path())
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
-    parser.add_argument("--target_variant", choices=["content", "motion58"], default="content")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
     parser.add_argument("--max_sequences", type=int, default=0)
     parser.add_argument("--predefined_splits_dir", type=str, default=None,
@@ -69,20 +68,17 @@ def make_loader(
     batch_size: int,
     num_workers: int,
     shuffle: bool,
-    target_variant: str,
     video_canvas_size: int,
     manifest: dict[str, dict[str, str]] | None = None,
 ) -> DataLoader:
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
-        load_left_audio=False,
         load_left_wav2vec_audio=True,
         load_left_video_embedding=False,
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_motion58_target=(target_variant == "motion58"),
-        include_content_target=(target_variant == "content"),
+        include_content_target=True,
         require_right_mp4=True,
         manifest=manifest,
     )
@@ -137,7 +133,6 @@ def main() -> None:
             args.batch_size,
             args.num_workers,
             shuffle=True,
-            target_variant=args.target_variant,
             video_canvas_size=args.video_canvas_size,
             manifest=manifest,
         )
@@ -146,14 +141,12 @@ def main() -> None:
         args.batch_size,
         args.num_workers,
         shuffle=False,
-        target_variant=args.target_variant,
         video_canvas_size=args.video_canvas_size,
         manifest=manifest,
     )
 
     model = DyadicContinuousTransformer(
         audio_dim=WAV2VEC_DIM,
-        target_variant=args.target_variant,
         feature_dim=args.feature_dim,
         n_heads=args.n_heads,
         num_encoder_layers=args.num_encoder_layers,
@@ -161,7 +154,7 @@ def main() -> None:
         dropout=args.dropout,
         video_chunk_size=args.video_chunk_size,
     ).to(device)
-    criterion = DyadicContinuousTransformerLoss(target_variant=args.target_variant, vel_weight=args.vel_weight)
+    criterion = DyadicContinuousTransformerLoss(vel_weight=args.vel_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_path = os.path.join(args.checkpoint_dir, "best.pt")
     use_amp = device.type == "cuda"
@@ -254,10 +247,9 @@ def main() -> None:
         model,
         val_loader,
         device=device,
-        target_variant=args.target_variant,
         use_amp=use_amp,
     )
-    metric_results["target_variant"] = args.target_variant
+    metric_results["target_variant"] = "content"
     metric_results["evaluation_split"] = eval_label
     metric_results.update({
         f"{eval_label}_{key}": value

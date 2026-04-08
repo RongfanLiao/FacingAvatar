@@ -73,13 +73,11 @@ def make_loader(
 ) -> DataLoader:
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
-        load_left_audio=False,
         load_left_wav2vec_audio=True,
         load_left_video_embedding=False,
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_motion58_target=False,
         include_content_target=True,
         require_right_mp4=True,
         manifest=manifest,

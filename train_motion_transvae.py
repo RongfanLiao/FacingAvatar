@@ -28,7 +28,7 @@ from benchmark.motion_transvae import (
     train_motion_transvae,
     validate_motion_transvae,
 )
-from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from benchmark.targets import FLAME_CONTENT_DIM
 from config import DEVICE, NUM_WORKERS, VIDEO_CANVAS_SIZE, WAV2VEC_DIM
 from manifest import load_documentary_manifest, load_manifest
 
@@ -47,7 +47,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split_path", default=default_benchmark_split_path())
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
-    parser.add_argument("--target_variant", choices=["content", "motion58"], default="content")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
     parser.add_argument("--documentary", action="store_true", help="Use documentary data manifest")
     parser.add_argument("--max_eval_samples", type=int, default=None, help="Limit number of val samples for evaluation")
@@ -65,20 +64,17 @@ def make_loader(
     batch_size: int,
     num_workers: int,
     shuffle: bool,
-    target_variant: str,
     video_canvas_size: int,
     manifest: dict[str, dict[str, str]] | None = None,
 ) -> DataLoader:
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
-        # load_left_audio=False,
         load_left_wav2vec_audio=True,
         load_left_video_embedding=False,
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_motion58_target=(target_variant == "motion58"),
-        include_content_target=(target_variant == "content"),
+        include_content_target=True,
         require_right_mp4=True,
         manifest=manifest,
     )
@@ -136,16 +132,16 @@ def main() -> None:
     if not args.eval_only:
         train_loader = make_loader(
             train_seqs, args.batch_size, args.num_workers, shuffle=True,
-            target_variant=args.target_variant, video_canvas_size=args.video_canvas_size,
+            video_canvas_size=args.video_canvas_size,
             manifest=manifest,
         )
     val_loader = make_loader(
         val_seqs, args.batch_size, args.num_workers, shuffle=False,
-        target_variant=args.target_variant, video_canvas_size=args.video_canvas_size,
+        video_canvas_size=args.video_canvas_size,
         manifest=manifest,
     )
 
-    output_dim = FLAME_CONTENT_DIM if args.target_variant == "content" else FLAME_58_DIM
+    output_dim = FLAME_CONTENT_DIM
 
     model = MotionTransformerVAE(
         audio_dim=WAV2VEC_DIM,
@@ -154,7 +150,7 @@ def main() -> None:
         n_heads=args.n_heads,
         max_seq_len=args.max_seq_len,
     ).to(device)
-    criterion = MotionVAELoss(target_variant=args.target_variant)
+    criterion = MotionVAELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     best_path = os.path.join(args.checkpoint_dir, "best.pt")
 
@@ -256,8 +252,8 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_metrics(model, val_loader, device=device, target_variant=args.target_variant, use_amp=use_amp)
-    metric_results["target_variant"] = args.target_variant
+    metric_results = evaluate_motion_metrics(model, val_loader, device=device, use_amp=use_amp)
+    metric_results["target_variant"] = "content"
     # metric_results["evaluation_split"] = eval_label
     # metric_results.update({
     #     f"{eval_label}_{key}": value

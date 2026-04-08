@@ -64,7 +64,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_sequences", type=int, default=0)
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
-    parser.add_argument("--target_variant", choices=["content", "motion58"], default="content")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
     parser.add_argument("--predefined_splits_dir", type=str, default=None,
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
@@ -78,20 +77,17 @@ def make_loader(
     batch_size: int,
     num_workers: int,
     shuffle: bool,
-    target_variant: str,
     video_canvas_size: int,
     manifest: dict[str, dict[str, str]] | None = None,
 ) -> DataLoader:
     dataset = LookingFaceBenchmarkDataset(
         seq_ids=seq_ids,
-        load_left_audio=False,
         load_left_wav2vec_audio=True,
         load_left_video_embedding=False,
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_motion58_target=(target_variant == "motion58"),
-        include_content_target=(target_variant == "content"),
+        include_content_target=True,
         require_right_mp4=True,
         manifest=manifest,
     )
@@ -154,7 +150,6 @@ def main() -> None:
         args.batch_size,
         args.num_workers,
         shuffle=True,
-        target_variant=args.target_variant,
         video_canvas_size=args.video_canvas_size,
         manifest=manifest,
     )
@@ -163,14 +158,12 @@ def main() -> None:
         args.batch_size,
         args.num_workers,
         shuffle=False,
-        target_variant=args.target_variant,
         video_canvas_size=args.video_canvas_size,
         manifest=manifest,
     )
 
     model = LookingFaceREGNN(
         fused_dim=args.fused_dim,
-        target_variant=args.target_variant,
         num_frames=args.num_frames,
         edge_dim=args.edge_dim,
         neighbors=args.neighbors,
@@ -180,7 +173,6 @@ def main() -> None:
         noise_threshold=(args.noise_threshold if args.noise_threshold > 0 else None),
     ).to(device)
     criterion = REGNNLoss(
-        target_variant=args.target_variant,
         neighbor_pattern=args.neighbor_pattern,
         use_mid_loss=not args.no_mid_loss,
         latent_weight=args.latent_weight,
@@ -270,8 +262,8 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_regnn_metrics(model, val_loader, device=device, target_variant=args.target_variant)
-    metric_results["target_variant"] = args.target_variant
+    metric_results = evaluate_regnn_metrics(model, val_loader, device=device)
+    metric_results["target_variant"] = "content"
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     with open(metric_path, "w") as f:

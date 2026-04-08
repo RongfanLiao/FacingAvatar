@@ -5,7 +5,7 @@ to the shared benchmark contract used by motion_transvae in this repository:
 
 - wav2vec audio features
 - raw left video frames
-- FLAME content or motion58 targets
+- FLAME content targets
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 from benchmark.motion_transvae import BaselineSpeakerEncoder, PositionalEncoding, evaluate_motion_metrics
-from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from benchmark.targets import FLAME_CONTENT_DIM
 from config import WAV2VEC_DIM
 
 
@@ -83,7 +83,6 @@ class DyadicContinuousTransformer(nn.Module):
     def __init__(
         self,
         audio_dim: int = WAV2VEC_DIM,
-        target_variant: str = "content",
         feature_dim: int = 256,
         n_heads: int = 8,
         num_encoder_layers: int = 6,
@@ -92,14 +91,7 @@ class DyadicContinuousTransformer(nn.Module):
         video_chunk_size: int = 8,
     ):
         super().__init__()
-        if target_variant == "content":
-            self.output_dim = FLAME_CONTENT_DIM
-        elif target_variant == "motion58":
-            self.output_dim = FLAME_58_DIM
-        else:
-            raise ValueError(f"Unsupported target_variant: {target_variant}")
-
-        self.target_variant = target_variant
+        self.output_dim = FLAME_CONTENT_DIM
         self.context_encoder = BaselineSpeakerEncoder(audio_dim=audio_dim, feature_dim=feature_dim)
         self.src_pos = PositionalEncoding(feature_dim, dropout=dropout)
         self.tgt_pos = PositionalEncoding(feature_dim, dropout=dropout)
@@ -217,15 +209,12 @@ class DyadicContinuousTransformer(nn.Module):
 
 @dataclass
 class DyadicContinuousTransformerLoss:
-    """Masked regression loss for target variants matching motion_transvae."""
+    """Masked regression loss for FLAME content targets."""
 
-    target_variant: str = "content"
     w_exp: float = 2.0
     w_jaw: float = 2.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
-    w_rot: float = 4.0
-    w_tran: float = 4.0
     vel_weight: float = 0.5
 
     def __call__(self, prediction: torch.Tensor, target: torch.Tensor, padding_mask: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
@@ -236,30 +225,17 @@ class DyadicContinuousTransformerLoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        if self.target_variant == "motion58":
-            exp_loss = masked_mean(mse[:, :, :52])
-            rot_loss = masked_mean(mse[:, :, 52:55])
-            tran_loss = masked_mean(mse[:, :, 55:58])
-            rec_loss = self.w_exp * exp_loss + self.w_rot * rot_loss + self.w_tran * tran_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_rot": float(rot_loss.item()),
-                "loss_tran": float(tran_loss.item()),
-            }
-        elif self.target_variant == "content":
-            exp_loss = masked_mean(mse[:, :, :100])
-            jaw_loss = masked_mean(mse[:, :, 100:103])
-            neck_loss = masked_mean(mse[:, :, 103:106])
-            eyes_loss = masked_mean(mse[:, :, 106:112])
-            rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_jaw": float(jaw_loss.item()),
-                "loss_neck": float(neck_loss.item()),
-                "loss_eyes": float(eyes_loss.item()),
-            }
-        else:
-            raise ValueError(f"Unsupported target_variant: {self.target_variant}")
+        exp_loss = masked_mean(mse[:, :, :100])
+        jaw_loss = masked_mean(mse[:, :, 100:103])
+        neck_loss = masked_mean(mse[:, :, 103:106])
+        eyes_loss = masked_mean(mse[:, :, 106:112])
+        rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
+        component_logs = {
+            "loss_exp": float(exp_loss.item()),
+            "loss_jaw": float(jaw_loss.item()),
+            "loss_neck": float(neck_loss.item()),
+            "loss_eyes": float(eyes_loss.item()),
+        }
 
         if prediction.shape[1] > 1:
             valid_velocity = (~padding_mask[:, 1:] & ~padding_mask[:, :-1]).unsqueeze(-1).float()
@@ -278,8 +254,8 @@ class DyadicContinuousTransformerLoss:
         }
 
 
-def _resolve_target(batch: dict[str, torch.Tensor], target_variant: str) -> torch.Tensor:
-    return batch["flame_target_58"] if target_variant == "motion58" else batch["flame_target_content"]
+def _resolve_target(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    return batch["flame_target_content"]
 
 
 def train_dyadic_dim(
@@ -304,7 +280,7 @@ def train_dyadic_dim(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch["left_video_frames"].to(device)
-        target = _resolve_target(batch, criterion.target_variant).to(device)
+        target = _resolve_target(batch).to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -367,7 +343,7 @@ def validate_dyadic_dim(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch["left_video_frames"].to(device)
-        target = _resolve_target(batch, criterion.target_variant).to(device)
+        target = _resolve_target(batch).to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -404,7 +380,6 @@ def evaluate_dyadic_dim_metrics(
     model: DyadicContinuousTransformer,
     loader,
     device: torch.device,
-    target_variant: str = "content",
     use_amp: bool = False,
 ) -> dict[str, float]:
     """Evaluate the port with the shared motion metric stack."""
@@ -428,6 +403,5 @@ def evaluate_dyadic_dim_metrics(
         _DyadicWrapper(model),
         loader,
         device=device,
-        target_variant=target_variant,
         use_amp=use_amp,
     )

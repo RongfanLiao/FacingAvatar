@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics
-from benchmark.targets import FLAME_CONTENT_DIM, FLAME_58_DIM
+from benchmark.targets import FLAME_CONTENT_DIM
 from config import WAV2VEC_DIM
 
 
@@ -291,7 +291,6 @@ class MotionDiffusionModel(nn.Module):
     def __init__(
         self,
         audio_dim: int = WAV2VEC_DIM,
-        target_variant: str = "content",
         feature_dim: int = 256,
         n_heads: int = 8,
         num_layers: int = 4,
@@ -309,14 +308,7 @@ class MotionDiffusionModel(nn.Module):
         ddim_eta: float = 0.0,
     ):
         super().__init__()
-        if target_variant == "content":
-            self.target_dim = FLAME_CONTENT_DIM
-        elif target_variant == "motion58":
-            self.target_dim = FLAME_58_DIM
-        else:
-            raise ValueError(f"Unsupported target_variant: {target_variant}")
-
-        self.target_variant = target_variant
+        self.target_dim = FLAME_CONTENT_DIM
         self.train_timesteps = train_timesteps
         self.inference_timesteps = min(inference_timesteps, train_timesteps)
         self.clip_sample = clip_sample
@@ -466,13 +458,10 @@ class MotionDiffusionModel(nn.Module):
 class MotionDiffusionLoss:
     """Masked content-aware reconstruction loss for diffusion training."""
 
-    target_variant: str = "content"
     w_exp: float = 2.0
     w_jaw: float = 2.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
-    w_rot: float = 4.0
-    w_tran: float = 4.0
     vel_weight: float = 0.5
 
     def __call__(self, prediction: torch.Tensor, target: torch.Tensor, padding_mask: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
@@ -483,30 +472,17 @@ class MotionDiffusionLoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        if self.target_variant == "motion58":
-            exp_loss = masked_mean(sq_error[:, :, :52])
-            rot_loss = masked_mean(sq_error[:, :, 52:55])
-            tran_loss = masked_mean(sq_error[:, :, 55:58])
-            rec_loss = self.w_exp * exp_loss + self.w_rot * rot_loss + self.w_tran * tran_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_rot": float(rot_loss.item()),
-                "loss_tran": float(tran_loss.item()),
-            }
-        elif self.target_variant == "content":
-            exp_loss = masked_mean(sq_error[:, :, :100])
-            jaw_loss = masked_mean(sq_error[:, :, 100:103])
-            neck_loss = masked_mean(sq_error[:, :, 103:106])
-            eyes_loss = masked_mean(sq_error[:, :, 106:112])
-            rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
-            component_logs = {
-                "loss_exp": float(exp_loss.item()),
-                "loss_jaw": float(jaw_loss.item()),
-                "loss_neck": float(neck_loss.item()),
-                "loss_eyes": float(eyes_loss.item()),
-            }
-        else:
-            raise ValueError(f"Unsupported target_variant: {self.target_variant}")
+        exp_loss = masked_mean(sq_error[:, :, :100])
+        jaw_loss = masked_mean(sq_error[:, :, 100:103])
+        neck_loss = masked_mean(sq_error[:, :, 103:106])
+        eyes_loss = masked_mean(sq_error[:, :, 106:112])
+        rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
+        component_logs = {
+            "loss_exp": float(exp_loss.item()),
+            "loss_jaw": float(jaw_loss.item()),
+            "loss_neck": float(neck_loss.item()),
+            "loss_eyes": float(eyes_loss.item()),
+        }
 
         if prediction.shape[1] > 1:
             valid_velocity = (~padding_mask[:, 1:] & ~padding_mask[:, :-1]).unsqueeze(-1).float()
@@ -525,8 +501,8 @@ class MotionDiffusionLoss:
         }
 
 
-def _resolve_target(batch: dict[str, torch.Tensor], target_variant: str) -> torch.Tensor:
-    return batch["flame_target_58"] if target_variant == "motion58" else batch["flame_target_content"]
+def _resolve_target(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    return batch["flame_target_content"]
 
 
 def train_motion_diffusion(
@@ -550,7 +526,7 @@ def train_motion_diffusion(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch["left_video_frames"].to(device)
-        target = _resolve_target(batch, criterion.target_variant).to(device)
+        target = _resolve_target(batch).to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -609,7 +585,7 @@ def validate_motion_diffusion(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch["left_video_frames"].to(device)
-        target = _resolve_target(batch, criterion.target_variant).to(device)
+        target = _resolve_target(batch).to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -645,7 +621,6 @@ def evaluate_motion_diffusion_metrics(
     model: MotionDiffusionModel,
     loader,
     device: torch.device,
-    target_variant: str = "content",
 ) -> dict[str, float]:
     """Run the shared benchmark metric stack on sampled diffusion outputs."""
 
@@ -658,4 +633,4 @@ def evaluate_motion_diffusion_metrics(
             del lengths
             return self.inner.sample(left_audio_feat, left_video_frames, padding_mask), None
 
-    return evaluate_motion_metrics(_SamplerWrapper(model), loader, device=device, target_variant=target_variant)
+    return evaluate_motion_metrics(_SamplerWrapper(model), loader, device=device)

@@ -170,22 +170,7 @@ Smaller values reduce memory and compute. Larger values increase model capacity.
 - Default: `0.1`
 - Meaning: dropout used in transformer layers
 
-### `--target_variant`
-
-- Choices: `content`, `motion58`
-- Default: `content`
-- Meaning: which FLAME target representation the diffusion model predicts
-
-`content`:
-
-- predicts the reduced FLAME content target used by this repo
-- shape is currently 112 per frame
-
-`motion58`:
-
-- predicts the reduced 58-d motion target
-
-Use `content` unless you are specifically benchmarking the 58-d target.
+The current diffusion benchmark path predicts the repository's 112-d FLAME content target.
 
 ## Diffusion process args
 

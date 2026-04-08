@@ -85,10 +85,9 @@ The manifest entry is normalized by `manifest.py`, and the benchmark dataset the
 1. `left_audio_feat`: padded temporal tensor shaped roughly `[B, T, 1280]`
 2. `left_video_feat`: fixed tensor shaped `[B, 3584]`
 3. `flame_target_118`: padded target tensor `[B, T, 118]`
-4. `flame_target_58`: padded target tensor `[B, T, 58]` when requested
-5. `flame_target_content`: padded target tensor `[B, T, 112]` when requested
-6. `lengths`: valid frame counts per sample
-7. `padding_mask`: padded-frame mask shaped `[B, T]`
+4. `flame_target_content`: padded target tensor `[B, T, 112]` when requested
+5. `lengths`: valid frame counts per sample
+6. `padding_mask`: padded-frame mask shaped `[B, T]`
 
 ### Temporal Alignment
 
@@ -117,18 +116,6 @@ Target conversion is implemented in `benchmark/targets.py`.
 6. `translation` (3)
 
 Total dimension: `118`
-
-### REACT-style Reduced Motion Target
-
-`flame_target_58` contains:
-
-1. `expr[:52]`
-2. `rotation`
-3. `translation`
-
-Total dimension: `58`
-
-This variant exists mainly for compatibility with legacy reduced-motion assumptions from the baseline code.
 
 ### Content Target
 
@@ -197,8 +184,7 @@ Data flow:
 
 Training target:
 
-1. default: `flame_target_content`
-2. optional: `flame_target_58`
+1. `flame_target_content`
 
 ### 2. motion_diffusion
 
@@ -222,8 +208,7 @@ Data flow:
 
 Training target:
 
-1. default: `flame_target_content`
-2. optional: `flame_target_58`
+1. `flame_target_content`
 
 Training loss:
 
@@ -260,8 +245,7 @@ Inference details:
 
 Training target:
 
-1. default: `flame_target_content`
-2. optional: `flame_target_58`
+1. `flame_target_content`
 
 Training objective:
 
@@ -304,13 +288,12 @@ Implementation:
 Data flow:
 
 1. wav2vec left-audio features and raw left-video frames are encoded into a speaker context stream
-2. a transformer encoder-decoder predicts either FLAME `content` or reduced `motion58` targets
+2. a transformer encoder-decoder predicts FLAME content targets
 3. training uses masked reconstruction with a velocity term
 
 Training target:
 
-1. default: `flame_target_content`
-2. optional: `flame_target_58`
+1. `flame_target_content`
 
 Inference details:
 
@@ -380,12 +363,6 @@ For `content`:
 3. `mae_neck`, `rmse_neck`
 4. `mae_eyes`, `rmse_eyes`
 
-For `motion58`:
-
-1. `mae_expr`, `rmse_expr`
-2. `mae_rot`, `rmse_rot`
-3. `mae_tran`, `rmse_tran`
-
 ### Metric Inputs
 
 Metric evaluation always compares predicted temporal target sequences against ground-truth temporal target sequences after trimming each sample to its valid frame length.
@@ -421,7 +398,6 @@ Example training command:
   --epochs 100 \
   --batch_size 4 \
   --lr 1e-5 \
-  --target_variant content \
   --checkpoint_dir checkpoints/motion_transvae_content
 ```
 
@@ -432,20 +408,18 @@ Example eval-only command:
   --eval_only \
   --batch_size 2 \
   --num_workers 0 \
-  --target_variant content \
   --checkpoint_dir checkpoints/motion_transvae_content
 ```
 
 Important arguments:
 
-1. `--target_variant {content,motion58}`
-2. `--feature_dim`
-3. `--n_heads`
-4. `--num_layers`
-5. `--dropout`
-6. `--div_p`
-7. `--train_val_same`
-8. `--eval_only`
+1. `--feature_dim`
+2. `--n_heads`
+3. `--num_layers`
+4. `--dropout`
+5. `--div_p`
+6. `--train_val_same`
+7. `--eval_only`
 
 ### motion_diffusion
 
@@ -459,7 +433,6 @@ Example training command:
 /home/r/rongfan/micromamba/envs/qwen_vl/bin/python train_motion_diffusion.py \
   --epochs 100 \
   --batch_size 4 \
-  --target_variant content \
   --checkpoint_dir checkpoints/motion_diffusion_content
 ```
 
@@ -471,7 +444,6 @@ Example smoke-test command:
   --val_period 1 \
   --batch_size 2 \
   --num_workers 0 \
-  --target_variant content \
   --feature_dim 64 \
   --n_heads 4 \
   --num_layers 2 \
@@ -485,17 +457,16 @@ Example smoke-test command:
 
 Important arguments:
 
-1. `--target_variant {content,motion58}`
-2. `--train_timesteps`
-3. `--inference_timesteps`
-4. `--guidance_scale`
-5. `--audio_drop_prob`
-6. `--video_drop_prob`
-7. `--latent_drop_prob`
-8. `--timestep_spacing`
-9. `--ddim_eta`
-10. `--max_sequences`
-11. `--eval_only`
+1. `--train_timesteps`
+2. `--inference_timesteps`
+3. `--guidance_scale`
+4. `--audio_drop_prob`
+5. `--video_drop_prob`
+6. `--latent_drop_prob`
+7. `--timestep_spacing`
+8. `--ddim_eta`
+9. `--max_sequences`
+10. `--eval_only`
 
 ### REGNN
 
@@ -509,7 +480,6 @@ Example training command:
 /home/r/rongfan/micromamba/envs/qwen_vl/bin/python train_regnn.py \
   --epochs 100 \
   --batch_size 4 \
-  --target_variant content \
   --checkpoint_dir checkpoints/regnn_content
 ```
 
@@ -521,7 +491,6 @@ Example faithful-objective smoke-test command:
   --val_period 1 \
   --batch_size 2 \
   --num_workers 0 \
-  --target_variant content \
   --fused_dim 32 \
   --num_frames 16 \
   --edge_dim 4 \
@@ -534,27 +503,25 @@ Example faithful-objective smoke-test command:
 
 Important arguments:
 
-1. `--target_variant {content,motion58}`
-2. `--num_frames`
-3. `--edge_dim`
-4. `--neighbors`
-5. `--layers`
-6. `--neighbor_pattern {all,nearest}`
-7. `--no_mid_loss`
-8. `--mid_weight`
-9. `--logdet_weight`
-10. `--reconstruction_weight`
-11. `--vel_weight`
-12. `--max_sequences`
-13. `--eval_only`
+1. `--num_frames`
+2. `--edge_dim`
+3. `--neighbors`
+4. `--layers`
+5. `--neighbor_pattern {all,nearest}`
+6. `--no_mid_loss`
+7. `--mid_weight`
+8. `--logdet_weight`
+9. `--reconstruction_weight`
+10. `--vel_weight`
+11. `--max_sequences`
+12. `--eval_only`
 
 ## Recommended Defaults
 
 For new LookingFace benchmark runs, use:
 
-1. `--target_variant content`
-2. a dedicated checkpoint directory per model and run
-3. `--num_workers 0` for first-pass debugging if anything fails in the dataloader
+1. a dedicated checkpoint directory per model and run
+2. `--num_workers 0` for first-pass debugging if anything fails in the dataloader
 
 Suggested pattern:
 
@@ -611,18 +578,16 @@ Useful options:
 ## Limitations and Adaptation Notes
 
 1. The imported models are adapted to the data layout available in this repository, not the exact REACT dataset contract.
-2. `content` is the preferred benchmark target for new runs.
-3. `motion58` exists for compatibility and comparison, but it is not the preferred target for current LookingFace evaluation.
-4. `REGNN` remains the most structurally adapted port because the original baseline depends more heavily on multi-candidate listener targets and a different feature extraction setup.
+2. The current benchmark codepath uses the content target throughout.
+3. `REGNN` remains the most structurally adapted port because the original baseline depends more heavily on multi-candidate listener targets and a different feature extraction setup.
 
 ## Summary
 
 If you only need the shortest operational guidance:
 
-1. use `content` target by default
-2. start with the shared split and `LookingFaceBenchmarkDataset`
-3. train with one of:
+1. start with the shared split and `LookingFaceBenchmarkDataset`
+2. train with one of:
    1. `train_motion_transvae.py`
    2. `train_motion_diffusion.py`
    3. `train_regnn.py`
-4. read `<checkpoint_dir>/metrics.json` after training or eval-only runs
+3. read `<checkpoint_dir>/metrics.json` after training or eval-only runs
