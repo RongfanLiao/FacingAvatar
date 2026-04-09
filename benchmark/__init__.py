@@ -30,6 +30,13 @@ from benchmark.motion_diffusion import (  # noqa: F401
     train_motion_diffusion,
     validate_motion_diffusion,
 )
+from benchmark.motion_flow_matching import (  # noqa: F401
+    FlowMatchingLoss,
+    MotionFlowMatchingModel,
+    evaluate_motion_flow_matching_metrics,
+    train_motion_flow_matching,
+    validate_motion_flow_matching,
+)
 from benchmark.regnn import (  # noqa: F401
     LookingFaceREGNN,
     REGNNLoss,

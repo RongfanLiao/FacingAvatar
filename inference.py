@@ -1,9 +1,10 @@
-"""Inference entrypoint for legacy, motion diffusion, motion TransVAE, REGNN, ListenFormer, Dyadic DIM, and DualTalk checkpoints.
+"""Inference entrypoint for legacy, motion diffusion, motion flow matching, motion TransVAE, REGNN, ListenFormer, Dyadic DIM, and DualTalk checkpoints.
 
 Usage:
     python inference.py --seq_id 2920
     python inference.py --seq_id 2920 --checkpoint checkpoints/best_model.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/motion_diffusion_lookingface/best.pt
+    python inference.py --seq_id 0012 --checkpoint checkpoints/motion_flow_matching_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/motion_transvae_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/regnn_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/listenformer_content/best.pt
@@ -24,10 +25,11 @@ from benchmark.lookingface import _fit_frame_to_canvas
 from benchmark.dualtalk import LookingFaceDualTalk
 from benchmark.dyadic_dim import DyadicContinuousTransformer
 from benchmark.motion_diffusion import MotionDiffusionModel
+from benchmark.motion_flow_matching import MotionFlowMatchingModel
 from benchmark.motion_transvae import MotionTransformerVAE, checkpoint_state_dict
 from benchmark.listenformer import LookingFaceListenFormer
 from benchmark.regnn import LookingFaceREGNN
-from benchmark.targets import FLAME_CONTENT_DIM
+from benchmark.targets import FLAME_118_DIM, FLAME_CONTENT_DIM
 from config import (
     AUDIO_EMB_DIR, VIDEO_EMB_DIR,
     WAV2VEC_EMB_DIR, WHISPER_MAX_FRAMES, WHISPER_CHUNK_SEC, CKPT_DIR, DEVICE,
@@ -47,6 +49,11 @@ def _load_checkpoint(checkpoint: str, device: torch.device) -> dict[str, object]
 def _detect_checkpoint_family(checkpoint_state: dict[str, torch.Tensor]) -> str:
     if "decoder.output_head.weight" in checkpoint_state:
         return "motion_transvae"
+    if (
+        "velocity_field.audio_proj.weight" in checkpoint_state
+        and "velocity_field.target_proj.weight" in checkpoint_state
+    ):
+        return "motion_flow_matching"
     if (
         "denoiser.audio_proj.weight" in checkpoint_state
         and "denoiser.target_proj.weight" in checkpoint_state
@@ -255,6 +262,82 @@ def _infer_motion_diffusion_config(checkpoint_state: dict[str, torch.Tensor]) ->
     }
 
 
+def _infer_motion_flow_matching_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int]:
+    feature_dim = int(checkpoint_state["velocity_field.audio_proj.weight"].shape[0])
+    audio_dim = int(checkpoint_state["velocity_field.audio_proj.weight"].shape[1])
+    output_dim = int(checkpoint_state["velocity_field.output_head.3.weight"].shape[0])
+
+    encoder_layer_indices = {
+        int(parts[3])
+        for key in checkpoint_state
+        if key.startswith("velocity_field.audio_encoder.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 4 and parts[3].isdigit()
+    }
+    decoder_layer_indices = {
+        int(parts[3])
+        for key in checkpoint_state
+        if key.startswith("velocity_field.decoder.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 4 and parts[3].isdigit()
+    }
+    num_layers = max(encoder_layer_indices | decoder_layer_indices) + 1 if (encoder_layer_indices or decoder_layer_indices) else 4
+
+    return {
+        "audio_dim": audio_dim,
+        "feature_dim": feature_dim,
+        "output_dim": output_dim,
+        "num_layers": num_layers,
+    }
+
+
+def _resolve_motion_flow_matching_config(ckpt: dict[str, object], state_dict: dict[str, torch.Tensor]) -> dict[str, int | float | str]:
+    saved_config = ckpt.get("model_config")
+    if isinstance(saved_config, dict) and saved_config.get("family") == "motion_flow_matching":
+        required_keys = {
+            "audio_dim",
+            "target_dim",
+            "feature_dim",
+            "n_heads",
+            "num_layers",
+            "dropout",
+            "solver",
+            "solver_steps",
+            "clip_sample",
+            "guidance_scale",
+            "time_embed_scale",
+        }
+        if required_keys.issubset(saved_config.keys()):
+            return {
+                "audio_dim": int(saved_config["audio_dim"]),
+                "output_dim": int(saved_config["target_dim"]),
+                "feature_dim": int(saved_config["feature_dim"]),
+                "n_heads": int(saved_config["n_heads"]),
+                "num_layers": int(saved_config["num_layers"]),
+                "dropout": float(saved_config["dropout"]),
+                "solver": str(saved_config["solver"]),
+                "solver_steps": int(saved_config["solver_steps"]),
+                "clip_sample": float(saved_config["clip_sample"]),
+                "guidance_scale": float(saved_config["guidance_scale"]),
+                "time_embed_scale": float(saved_config["time_embed_scale"]),
+            }
+
+    inferred = _infer_motion_flow_matching_config(state_dict)
+    return {
+        "audio_dim": int(inferred["audio_dim"]),
+        "output_dim": int(inferred["output_dim"]),
+        "feature_dim": int(inferred["feature_dim"]),
+        "n_heads": 8,
+        "num_layers": int(inferred["num_layers"]),
+        "dropout": 0.1,
+        "solver": "heun",
+        "solver_steps": 40,
+        "clip_sample": 5.0,
+        "guidance_scale": 1.5,
+        "time_embed_scale": 1000.0,
+    }
+
+
 def _build_motion_transvae_inputs(seq_id: str, n_frames: int, video_canvas_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     manifest = load_manifest()
     entry = manifest.get(seq_id)
@@ -290,14 +373,83 @@ def _build_motion_transvae_inputs(seq_id: str, n_frames: int, video_canvas_size:
 def _motion_prediction_to_flame(prediction: np.ndarray, label_npz: np.lib.npyio.NpzFile, output_dim: int) -> dict[str, np.ndarray]:
     results = {key: np.asarray(label_npz[key]) for key in label_npz.files}
 
-    if output_dim != FLAME_CONTENT_DIM:
-        raise RuntimeError(f"Unsupported motion prediction output dim: {output_dim}")
+    if output_dim == FLAME_118_DIM:
+        results["expr"] = prediction[:, :100]
+        results["jaw_pose"] = prediction[:, 100:103]
+        results["rotation"] = prediction[:, 103:106]
+        results["neck_pose"] = prediction[:, 106:109]
+        results["eyes_pose"] = prediction[:, 109:115]
+        results["translation"] = prediction[:, 115:118]
+        return results
 
-    results["expr"] = prediction[:, :100]
-    results["jaw_pose"] = prediction[:, 100:103]
-    results["neck_pose"] = prediction[:, 103:106]
-    results["eyes_pose"] = prediction[:, 106:112]
-    return results
+    if output_dim == FLAME_CONTENT_DIM:
+        results["expr"] = prediction[:, :100]
+        results["jaw_pose"] = prediction[:, 100:103]
+        results["neck_pose"] = prediction[:, 103:106]
+        results["eyes_pose"] = prediction[:, 106:112]
+        return results
+
+    raise RuntimeError(f"Unsupported motion prediction output dim: {output_dim}")
+
+
+def predict_motion_flow_matching(
+    seq_id: str,
+    checkpoint: str,
+    n_frames: int,
+    video_canvas_size: int,
+    n_heads: int,
+    dropout: float,
+    solver: str,
+    solver_steps: int,
+    clip_sample: float,
+    guidance_scale: float,
+    time_embed_scale: float,
+) -> dict[str, np.ndarray]:
+    device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    ckpt = _load_checkpoint(checkpoint, device)
+    state_dict = checkpoint_state_dict(ckpt)
+    flow_config = _resolve_motion_flow_matching_config(ckpt, state_dict)
+    output_dim = int(flow_config["output_dim"])
+
+    model = MotionFlowMatchingModel(
+        audio_dim=int(flow_config["audio_dim"]),
+        target_dim=output_dim,
+        feature_dim=int(flow_config["feature_dim"]),
+        n_heads=int(flow_config.get("n_heads", n_heads)),
+        num_layers=int(flow_config["num_layers"]),
+        dropout=float(flow_config.get("dropout", dropout)),
+        solver=str(flow_config.get("solver", solver)),
+        solver_steps=int(flow_config.get("solver_steps", solver_steps)),
+        clip_sample=float(flow_config.get("clip_sample", clip_sample)),
+        guidance_scale=float(flow_config.get("guidance_scale", guidance_scale)),
+        audio_drop_prob=0.0,
+        video_drop_prob=0.0,
+        latent_drop_prob=0.0,
+        time_embed_scale=float(flow_config.get("time_embed_scale", time_embed_scale)),
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    audio_t, video_t, _, padding_mask = _build_motion_transvae_inputs(seq_id, n_frames, video_canvas_size)
+    audio_t = audio_t.to(device)
+    video_t = video_t.to(device)
+    padding_mask = padding_mask.to(device)
+
+    with torch.no_grad():
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+            prediction = model.sample(
+                left_audio_feat=audio_t,
+                left_video_frames=video_t,
+                padding_mask=padding_mask,
+            )
+
+    pred_np = prediction[0, :n_frames].detach().cpu().numpy().astype(np.float32)
+    manifest = load_manifest()
+    label_npz = np.load(manifest[seq_id]["flame_npz"])
+    try:
+        return _motion_prediction_to_flame(pred_np, label_npz, output_dim)
+    finally:
+        label_npz.close()
 
 
 def predict_motion_transvae(
@@ -636,6 +788,13 @@ def main():
     parser.add_argument("--motion_diffusion_guidance_scale", type=float, default=1.5, help="Motion diffusion classifier-free guidance scale used during inference")
     parser.add_argument("--motion_diffusion_timestep_spacing", choices=["leading", "linspace", "trailing", "full"], default="leading", help="Motion diffusion timestep spacing strategy used during inference")
     parser.add_argument("--motion_diffusion_ddim_eta", type=float, default=0.0, help="Motion diffusion DDIM eta used during inference")
+    parser.add_argument("--motion_flow_matching_n_heads", type=int, default=8, help="Motion flow matching attention head count used when reconstructing the model for inference")
+    parser.add_argument("--motion_flow_matching_dropout", type=float, default=0.1, help="Motion flow matching dropout used when reconstructing the model for inference")
+    parser.add_argument("--motion_flow_matching_solver", choices=["euler", "heun"], default="heun", help="Motion flow matching ODE solver used during inference")
+    parser.add_argument("--motion_flow_matching_solver_steps", type=int, default=40, help="Motion flow matching ODE integration steps used during inference")
+    parser.add_argument("--motion_flow_matching_clip_sample", type=float, default=5.0, help="Motion flow matching sample clamp range used during inference")
+    parser.add_argument("--motion_flow_matching_guidance_scale", type=float, default=1.5, help="Motion flow matching classifier-free guidance scale used during inference")
+    parser.add_argument("--motion_flow_matching_time_embed_scale", type=float, default=1000.0, help="Motion flow matching continuous-time embedding scale used during inference")
     parser.add_argument("--dyadic_n_heads", type=int, default=8, help="Dyadic ContinuousTransformer attention head count used when reconstructing the model for inference")
     parser.add_argument("--dyadic_dropout", type=float, default=0.1, help="Dyadic ContinuousTransformer dropout used when reconstructing the model for inference")
     parser.add_argument("--dyadic_video_chunk_size", type=int, default=8, help="Dyadic ContinuousTransformer video encoder chunk size for inference")
@@ -688,6 +847,20 @@ def main():
             guidance_scale=args.motion_diffusion_guidance_scale,
             timestep_spacing=args.motion_diffusion_timestep_spacing,
             ddim_eta=args.motion_diffusion_ddim_eta,
+        )
+    elif checkpoint_family == "motion_flow_matching":
+        results = predict_motion_flow_matching(
+            args.seq_id,
+            args.checkpoint,
+            n_frames,
+            video_canvas_size=args.video_canvas_size,
+            n_heads=args.motion_flow_matching_n_heads,
+            dropout=args.motion_flow_matching_dropout,
+            solver=args.motion_flow_matching_solver,
+            solver_steps=args.motion_flow_matching_solver_steps,
+            clip_sample=args.motion_flow_matching_clip_sample,
+            guidance_scale=args.motion_flow_matching_guidance_scale,
+            time_embed_scale=args.motion_flow_matching_time_embed_scale,
         )
     elif checkpoint_family == "dyadic_dim":
         results = predict_dyadic_dim(
