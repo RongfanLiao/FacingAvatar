@@ -28,7 +28,7 @@ from benchmark.motion_transvae import (
     train_motion_transvae,
     validate_motion_transvae,
 )
-from benchmark.targets import FLAME_CONTENT_DIM
+from benchmark.targets import FLAME_118_DIM, flame_target_variant
 from config import DEVICE, NUM_WORKERS, VIDEO_CANVAS_SIZE, WAV2VEC_DIM
 from manifest import load_documentary_manifest, load_manifest
 
@@ -74,7 +74,7 @@ def make_loader(
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_content_target=True,
+        include_content_target=False,
         require_right_mp4=True,
         manifest=manifest,
     )
@@ -141,7 +141,7 @@ def main() -> None:
         manifest=manifest,
     )
 
-    output_dim = FLAME_CONTENT_DIM
+    output_dim = FLAME_118_DIM
 
     model = MotionTransformerVAE(
         audio_dim=WAV2VEC_DIM,
@@ -252,8 +252,14 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_metrics(model, val_loader, device=device, use_amp=use_amp)
-    metric_results["target_variant"] = "content"
+    metric_results = evaluate_motion_metrics(
+        model,
+        val_loader,
+        device=device,
+        target_variant=flame_target_variant(output_dim),
+        use_amp=use_amp,
+    )
+    metric_results["target_variant"] = flame_target_variant(output_dim)
     # metric_results["evaluation_split"] = eval_label
     # metric_results.update({
     #     f"{eval_label}_{key}": value

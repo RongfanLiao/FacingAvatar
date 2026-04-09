@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from benchmark.motion_transvae import BaselineSpeakerEncoder, evaluate_motion_metrics
-from benchmark.targets import FLAME_CONTENT_DIM
+from benchmark.targets import FLAME_118_DIM, flame_component_layout, flame_target_key, flame_target_variant
 from config import WAV2VEC_DIM
 
 
@@ -263,6 +263,7 @@ class LookingFaceREGNN(nn.Module):
     def __init__(
         self,
         audio_dim: int = WAV2VEC_DIM,
+        target_dim: int = FLAME_118_DIM,
         fused_dim: int = 64,
         num_frames: int = 50,
         edge_dim: int = 8,
@@ -273,7 +274,7 @@ class LookingFaceREGNN(nn.Module):
         noise_threshold: float | None = None,
     ):
         super().__init__()
-        self.target_dim = FLAME_CONTENT_DIM
+        self.target_dim = target_dim
         self.num_frames = num_frames
         self.noise_threshold = noise_threshold
         self.perceptual_processor = LookingFacePercepProcessor(audio_dim=audio_dim, fused_dim=fused_dim, dropout=dropout)
@@ -382,8 +383,8 @@ class LookingFaceREGNN(nn.Module):
         return torch.stack(padded, dim=0)
 
 
-def _resolve_target(batch: dict[str, torch.Tensor]) -> torch.Tensor:
-    return batch["flame_target_content"]
+def _resolve_target(batch: dict[str, torch.Tensor], target_dim: int) -> torch.Tensor:
+    return batch[flame_target_key(target_dim)]
 
 
 def build_regnn_clips(
@@ -396,7 +397,7 @@ def build_regnn_clips(
     left_video = batch.get("left_video_frames", batch.get("left_video_feat"))
     if left_video is None:
         raise KeyError("REGNN expects left_video_frames or left_video_feat in the batch")
-    target = _resolve_target(batch)
+    target = _resolve_target(batch, num_frames and target.shape[-1] if False else batch[flame_target_key(batch["flame_target_118"].shape[-1] if "flame_target_118" in batch else 118)].shape[-1])
     lengths = batch["lengths"]
 
     audio_clips = []

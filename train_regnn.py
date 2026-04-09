@@ -87,7 +87,7 @@ def make_loader(
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_content_target=True,
+        include_content_target=False,
         require_right_mp4=True,
         manifest=manifest,
     )
@@ -163,6 +163,7 @@ def main() -> None:
     )
 
     model = LookingFaceREGNN(
+        target_dim=118,
         fused_dim=args.fused_dim,
         num_frames=args.num_frames,
         edge_dim=args.edge_dim,

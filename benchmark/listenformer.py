@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics
-from benchmark.targets import FLAME_CONTENT_DIM
+from benchmark.targets import FLAME_118_DIM, flame_component_layout, flame_target_variant
 from config import WAV2VEC_DIM
 
 
@@ -81,7 +81,7 @@ class LookingFaceListenFormer(nn.Module):
     def __init__(
         self,
         audio_dim: int = WAV2VEC_DIM,
-        output_dim: int = FLAME_CONTENT_DIM,
+        output_dim: int = FLAME_118_DIM,
         feature_dim: int = 256,
         n_heads: int = 8,
         num_encoder_layers: int = 3,
@@ -234,8 +234,10 @@ class ListenFormerLoss:
 
     w_exp: float = 2.0
     w_jaw: float = 2.0
+    w_rot: float = 1.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
+    w_tran: float = 0.1
     vel_weight: float = 0.5
 
     def __call__(self, prediction: torch.Tensor, target: torch.Tensor, padding_mask: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
@@ -246,11 +248,12 @@ class ListenFormerLoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        exp_loss = masked_mean(sq_error[:, :, :100])
-        jaw_loss = masked_mean(sq_error[:, :, 100:103])
-        neck_loss = masked_mean(sq_error[:, :, 103:106])
-        eyes_loss = masked_mean(sq_error[:, :, 106:112])
-        rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
+        component_logs: dict[str, float] = {}
+        rec_loss = prediction.new_tensor(0.0)
+        for name, component_slice in flame_component_layout(prediction.shape[-1]):
+            component_loss = masked_mean(sq_error[:, :, component_slice])
+            rec_loss = rec_loss + getattr(self, f"w_{name}") * component_loss
+            component_logs[f"loss_{name}"] = float(component_loss.item())
 
         if prediction.shape[1] > 1:
             valid_velocity = (~padding_mask[:, 1:] & ~padding_mask[:, :-1]).unsqueeze(-1).float()
@@ -265,10 +268,7 @@ class ListenFormerLoss:
             "loss_total": float(total.item()),
             "loss_rec": float(rec_loss.item()),
             "loss_vel": float(vel_loss.item()),
-            "loss_exp": float(exp_loss.item()),
-            "loss_jaw": float(jaw_loss.item()),
-            "loss_neck": float(neck_loss.item()),
-            "loss_eyes": float(eyes_loss.item()),
+            **component_logs,
         }
 
 
@@ -294,7 +294,7 @@ def train_listenformer(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch["left_video_frames"].to(device)
-        target = batch["flame_target_content"].to(device)
+        target = batch["flame_target_118"].to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -357,7 +357,7 @@ def validate_listenformer(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch["left_video_frames"].to(device)
-        target = batch["flame_target_content"].to(device)
+        target = batch["flame_target_118"].to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -417,6 +417,6 @@ def evaluate_listenformer_metrics(
         _ListenFormerWrapper(model),
         loader,
         device=device,
-        target_variant="content",
+        target_variant=flame_target_variant(model.output_dim),
         use_amp=use_amp,
     )

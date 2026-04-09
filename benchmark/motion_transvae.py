@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from benchmark.targets import FLAME_CONTENT_DIM
+from benchmark.targets import FLAME_118_DIM, FLAME_CONTENT_DIM, flame_component_layout, flame_target_key, flame_target_variant
 from config import VIDEO_CANVAS_SIZE, WAV2VEC_DIM
 
 
@@ -112,7 +112,7 @@ class LatentVAE(nn.Module):
 class MotionDecoder(nn.Module):
     """Transformer decoder that predicts FLAME content targets."""
 
-    def __init__(self, output_dim: int = FLAME_CONTENT_DIM, feature_dim: int = 128, n_head: int = 4, max_seq_len: int = 1024):
+    def __init__(self, output_dim: int = FLAME_118_DIM, feature_dim: int = 128, n_head: int = 4, max_seq_len: int = 1024):
         super().__init__()
         self.output_dim = output_dim
         self.feature_dim = feature_dim
@@ -314,7 +314,7 @@ class MotionTransformerVAE(nn.Module):
     def __init__(
         self,
         audio_dim: int = WAV2VEC_DIM,
-        output_dim: int = FLAME_CONTENT_DIM,
+        output_dim: int = FLAME_118_DIM,
         feature_dim: int = 128,
         n_heads: int = 4,
         max_seq_len: int = 1024,
@@ -352,8 +352,10 @@ class MotionVAELoss:
     kl_p: float = 1e-5
     w_exp: float = 2.0
     w_jaw: float = 2.0
+    w_rot: float = 1.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
+    w_tran: float = 0.1
 
     def __call__(
         self,
@@ -369,22 +371,12 @@ class MotionVAELoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        exp_loss = masked_mean(mse[:, :, :100])
-        jaw_loss = masked_mean(mse[:, :, 100:103])
-        neck_loss = masked_mean(mse[:, :, 103:106])
-        eyes_loss = masked_mean(mse[:, :, 106:112])
-        rec_loss = (
-            self.w_exp * exp_loss
-            + self.w_jaw * jaw_loss
-            + self.w_neck * neck_loss
-            + self.w_eyes * eyes_loss
-        )
-        component_logs = {
-            "loss_exp": float(exp_loss.item()),
-            "loss_jaw": float(jaw_loss.item()),
-            "loss_neck": float(neck_loss.item()),
-            "loss_eyes": float(eyes_loss.item()),
-        }
+        component_logs: dict[str, float] = {}
+        rec_loss = prediction.new_tensor(0.0)
+        for name, component_slice in flame_component_layout(prediction.shape[-1]):
+            component_loss = masked_mean(mse[:, :, component_slice])
+            rec_loss = rec_loss + getattr(self, f"w_{name}") * component_loss
+            component_logs[f"loss_{name}"] = float(component_loss.item())
 
         mu_ref = torch.zeros_like(distribution.loc)
         scale_ref = torch.ones_like(distribution.scale)
@@ -474,7 +466,7 @@ def train_motion_transvae(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
-        target = batch["flame_target_content"].to(device)
+        target = batch[flame_target_key(model.decoder.output_dim)].to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -539,7 +531,7 @@ def validate_motion_transvae(
     for batch_idx, batch in enumerate(loader, start=1):
         left_audio = batch["left_audio_feat"].to(device)
         left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
-        target = batch["flame_target_content"].to(device)
+        target = batch[flame_target_key(model.decoder.output_dim)].to(device)
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
@@ -682,6 +674,7 @@ def evaluate_motion_metrics(
     model,
     loader,
     device,
+    target_variant: str = "content",
     use_amp: bool = False,
     eval_label: str = "val",
     log_interval: int = 1,
@@ -700,9 +693,16 @@ def evaluate_motion_metrics(
     evaluated_sequences = 0
     evaluated_frames = 0
 
-    target_key = "flame_target_content"
-    feature_dim = FLAME_CONTENT_DIM
-    frd_func = _content_frd
+    if target_variant == "full":
+        target_key = "flame_target_118"
+        feature_dim = FLAME_118_DIM
+        frd_func = _motion_frd
+    elif target_variant == "content":
+        target_key = "flame_target_content"
+        feature_dim = FLAME_CONTENT_DIM
+        frd_func = _content_frd
+    else:
+        raise ValueError(f"Unsupported target variant: {target_variant}")
 
     total_batches = len(loader)
     eval_start_time = time.perf_counter()
@@ -776,16 +776,9 @@ def evaluate_motion_metrics(
         "frdist": float(np.mean(frd_list)),
     }
 
-    metrics.update({
-        "mae_expr": float(abs_errors_arr[:, :100].mean()),
-        "mae_jaw": float(abs_errors_arr[:, 100:103].mean()),
-        "mae_neck": float(abs_errors_arr[:, 103:106].mean()),
-        "mae_eyes": float(abs_errors_arr[:, 106:112].mean()),
-        "rmse_expr": float(np.sqrt(sq_errors_arr[:, :100].mean())),
-        "rmse_jaw": float(np.sqrt(sq_errors_arr[:, 100:103].mean())),
-        "rmse_neck": float(np.sqrt(sq_errors_arr[:, 103:106].mean())),
-        "rmse_eyes": float(np.sqrt(sq_errors_arr[:, 106:112].mean())),
-    })
+    for name, component_slice in flame_component_layout(feature_dim):
+        metrics[f"mae_{name}"] = float(abs_errors_arr[:, component_slice].mean())
+        metrics[f"rmse_{name}"] = float(np.sqrt(sq_errors_arr[:, component_slice].mean()))
 
     if delta_pred_arr.shape[0] > 0 and delta_target_arr.shape[0] > 0:
         delta_abs = np.abs(delta_pred_arr - delta_target_arr)

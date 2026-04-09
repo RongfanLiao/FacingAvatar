@@ -287,7 +287,7 @@ class LookingFaceBenchmarkDataset(Dataset):
         load_left_video_embedding: bool = True,
         load_flame_target: bool = True,
         align_left_audio_to_flame: bool = True,
-        include_content_target: bool = True,
+        include_content_target: bool = False,
         require_right_mp4: bool = True,
         load_left_video_raw: bool = False,
         load_left_wav2vec_audio: bool = False,

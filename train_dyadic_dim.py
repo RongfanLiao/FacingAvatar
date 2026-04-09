@@ -78,7 +78,7 @@ def make_loader(
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_content_target=True,
+        include_content_target=False,
         require_right_mp4=True,
         manifest=manifest,
     )

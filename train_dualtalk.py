@@ -38,7 +38,7 @@ def dualtalk_model_config(args: argparse.Namespace) -> dict[str, object]:
     return {
         "family": "dualtalk",
         "audio_dim": WAV2VEC_DIM,
-        "output_dim": 112,
+        "output_dim": 118,
         "feature_dim": args.feature_dim,
         "n_heads": args.n_heads,
         "interaction_layers": args.interaction_layers,
@@ -102,7 +102,7 @@ def make_loader(
         load_left_video_raw=True,
         video_canvas_size=video_canvas_size,
         load_flame_target=True,
-        include_content_target=True,
+        include_content_target=False,
         require_right_mp4=True,
         manifest=manifest,
     )
