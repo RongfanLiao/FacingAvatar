@@ -1,8 +1,9 @@
-"""Inference entrypoint for legacy, motion TransVAE, REGNN, ListenFormer, Dyadic DIM, and DualTalk checkpoints.
+"""Inference entrypoint for legacy, motion diffusion, motion TransVAE, REGNN, ListenFormer, Dyadic DIM, and DualTalk checkpoints.
 
 Usage:
     python inference.py --seq_id 2920
     python inference.py --seq_id 2920 --checkpoint checkpoints/best_model.pt
+    python inference.py --seq_id 0012 --checkpoint checkpoints/motion_diffusion_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/motion_transvae_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/regnn_lookingface/best.pt
     python inference.py --seq_id 0012 --checkpoint checkpoints/listenformer_content/best.pt
@@ -22,7 +23,8 @@ from torch.nn.utils.rnn import pad_sequence
 from benchmark.lookingface import _fit_frame_to_canvas
 from benchmark.dualtalk import LookingFaceDualTalk
 from benchmark.dyadic_dim import DyadicContinuousTransformer
-from benchmark.motion_transvae import MotionTransformerVAE
+from benchmark.motion_diffusion import MotionDiffusionModel
+from benchmark.motion_transvae import MotionTransformerVAE, checkpoint_state_dict
 from benchmark.listenformer import LookingFaceListenFormer
 from benchmark.regnn import LookingFaceREGNN
 from benchmark.targets import FLAME_CONTENT_DIM
@@ -45,6 +47,12 @@ def _load_checkpoint(checkpoint: str, device: torch.device) -> dict[str, object]
 def _detect_checkpoint_family(checkpoint_state: dict[str, torch.Tensor]) -> str:
     if "decoder.output_head.weight" in checkpoint_state:
         return "motion_transvae"
+    if (
+        "denoiser.audio_proj.weight" in checkpoint_state
+        and "denoiser.target_proj.weight" in checkpoint_state
+        and "alpha_bars" in checkpoint_state
+    ):
+        return "motion_diffusion"
     if "context_encoder.audio_feature_map.weight" in checkpoint_state and "encoder.layers.0.self_attn.in_proj_weight" in checkpoint_state:
         return "dyadic_dim"
     if "joint_encoder.speaker_encoder.audio_feature_map.weight" in checkpoint_state and "synthesis_module.modulation_layer.weight" in checkpoint_state:
@@ -215,6 +223,38 @@ def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, 
     }
 
 
+def _infer_motion_diffusion_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, int]:
+    feature_dim = int(checkpoint_state["denoiser.audio_proj.weight"].shape[0])
+    audio_dim = int(checkpoint_state["denoiser.audio_proj.weight"].shape[1])
+    output_dim = int(checkpoint_state["denoiser.output_head.3.weight"].shape[0])
+
+    encoder_layer_indices = {
+        int(parts[3])
+        for key in checkpoint_state
+        if key.startswith("denoiser.audio_encoder.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 4 and parts[3].isdigit()
+    }
+    decoder_layer_indices = {
+        int(parts[3])
+        for key in checkpoint_state
+        if key.startswith("denoiser.decoder.layers.")
+        for parts in [key.split(".")]
+        if len(parts) > 4 and parts[3].isdigit()
+    }
+    num_layers = max(encoder_layer_indices | decoder_layer_indices) + 1 if (encoder_layer_indices or decoder_layer_indices) else 4
+
+    if output_dim != FLAME_CONTENT_DIM:
+        raise RuntimeError(f"Unsupported motion diffusion output dim: {output_dim}")
+
+    return {
+        "audio_dim": audio_dim,
+        "feature_dim": feature_dim,
+        "output_dim": output_dim,
+        "num_layers": num_layers,
+    }
+
+
 def _build_motion_transvae_inputs(seq_id: str, n_frames: int, video_canvas_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     manifest = load_manifest()
     entry = manifest.get(seq_id)
@@ -268,9 +308,10 @@ def predict_motion_transvae(
 ) -> dict[str, np.ndarray]:
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     ckpt = _load_checkpoint(checkpoint, device)
-    output_dim = int(ckpt["model_state_dict"]["decoder.output_head.weight"].shape[0])
+    state_dict = checkpoint_state_dict(ckpt)
+    output_dim = int(state_dict["decoder.output_head.weight"].shape[0])
     model = MotionTransformerVAE(output_dim=output_dim).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(state_dict)
     model.eval()
 
     audio_t, video_t, lengths, padding_mask = _build_motion_transvae_inputs(seq_id, n_frames, video_canvas_size)
@@ -303,7 +344,7 @@ def predict_regnn(
 ) -> dict[str, np.ndarray]:
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     ckpt = _load_checkpoint(checkpoint, device)
-    state_dict = ckpt["model_state_dict"]
+    state_dict = checkpoint_state_dict(ckpt)
     regnn_config = _infer_regnn_config(state_dict)
     target_dim = FLAME_CONTENT_DIM
 
@@ -353,7 +394,7 @@ def predict_listenformer(
 ) -> dict[str, np.ndarray]:
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     ckpt = _load_checkpoint(checkpoint, device)
-    state_dict = ckpt["model_state_dict"]
+    state_dict = checkpoint_state_dict(ckpt)
     listenformer_config = _infer_listenformer_config(state_dict)
 
     output_dim = int(listenformer_config["output_dim"])
@@ -409,7 +450,7 @@ def predict_dyadic_dim(
 ) -> dict[str, np.ndarray]:
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     ckpt = _load_checkpoint(checkpoint, device)
-    state_dict = ckpt["model_state_dict"]
+    state_dict = checkpoint_state_dict(ckpt)
     dyadic_config = _infer_dyadic_dim_config(state_dict)
     output_dim = int(dyadic_config["output_dim"])
 
@@ -462,7 +503,7 @@ def predict_dualtalk(
 ) -> dict[str, np.ndarray]:
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     ckpt = _load_checkpoint(checkpoint, device)
-    state_dict = ckpt["model_state_dict"]
+    state_dict = checkpoint_state_dict(ckpt)
     dualtalk_config = _resolve_dualtalk_config(ckpt, state_dict)
     output_dim = int(dualtalk_config["output_dim"])
 
@@ -507,6 +548,70 @@ def predict_dualtalk(
         label_npz.close()
 
 
+def predict_motion_diffusion(
+    seq_id: str,
+    checkpoint: str,
+    n_frames: int,
+    video_canvas_size: int,
+    n_heads: int,
+    dropout: float,
+    train_timesteps: int,
+    inference_timesteps: int,
+    beta_start: float,
+    beta_end: float,
+    clip_sample: float,
+    guidance_scale: float,
+    timestep_spacing: str,
+    ddim_eta: float,
+) -> dict[str, np.ndarray]:
+    device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    ckpt = _load_checkpoint(checkpoint, device)
+    state_dict = checkpoint_state_dict(ckpt)
+    diffusion_config = _infer_motion_diffusion_config(state_dict)
+
+    model = MotionDiffusionModel(
+        audio_dim=int(diffusion_config["audio_dim"]),
+        feature_dim=int(diffusion_config["feature_dim"]),
+        n_heads=n_heads,
+        num_layers=int(diffusion_config["num_layers"]),
+        dropout=dropout,
+        train_timesteps=train_timesteps,
+        inference_timesteps=inference_timesteps,
+        beta_start=beta_start,
+        beta_end=beta_end,
+        clip_sample=clip_sample,
+        guidance_scale=guidance_scale,
+        audio_drop_prob=0.0,
+        video_drop_prob=0.0,
+        latent_drop_prob=0.0,
+        timestep_spacing=timestep_spacing,
+        ddim_eta=ddim_eta,
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    audio_t, video_t, _, padding_mask = _build_motion_transvae_inputs(seq_id, n_frames, video_canvas_size)
+    audio_t = audio_t.to(device)
+    video_t = video_t.to(device)
+    padding_mask = padding_mask.to(device)
+
+    with torch.no_grad():
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+            prediction = model.sample(
+                left_audio_feat=audio_t,
+                left_video_frames=video_t,
+                padding_mask=padding_mask,
+            )
+
+    pred_np = prediction[0, :n_frames].detach().cpu().numpy().astype(np.float32)
+    manifest = load_manifest()
+    label_npz = np.load(manifest[seq_id]["flame_npz"])
+    try:
+        return _motion_prediction_to_flame(pred_np, label_npz, int(diffusion_config["output_dim"]))
+    finally:
+        label_npz.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Predict FLAME params from audio+video")
     parser.add_argument("--seq_id", type=str, required=True, help="Sequence ID (e.g. 2920)")
@@ -515,7 +620,22 @@ def main():
     parser.add_argument("--output_dir", type=str, default="work_dir/predicted", help="Output directory")
     parser.add_argument("--gen_vis", action="store_true", help="Pack output into a per-sequence dir with foreground_image.png and transforms.json for visualization")
     parser.add_argument("--smooth", type=int, default=5, help="Temporal smoothing window size (0=disabled)")
+    parser.add_argument(
+        "--zero_rotation_translation",
+        action="store_true",
+        help="Set FLAME rotation and translation to zeros in the final exported output",
+    )
     parser.add_argument("--video_canvas_size", type=int, default=400, help="Canvas size for motion TransVAE raw-frame inference")
+    parser.add_argument("--motion_diffusion_n_heads", type=int, default=8, help="Motion diffusion attention head count used when reconstructing the model for inference")
+    parser.add_argument("--motion_diffusion_dropout", type=float, default=0.1, help="Motion diffusion dropout used when reconstructing the model for inference")
+    parser.add_argument("--motion_diffusion_train_timesteps", type=int, default=1000, help="Motion diffusion training schedule length used when reconstructing the sampler")
+    parser.add_argument("--motion_diffusion_inference_timesteps", type=int, default=50, help="Motion diffusion reverse sampling steps used during inference")
+    parser.add_argument("--motion_diffusion_beta_start", type=float, default=1e-4, help="Motion diffusion beta schedule start used for inference")
+    parser.add_argument("--motion_diffusion_beta_end", type=float, default=2e-2, help="Motion diffusion beta schedule end used for inference")
+    parser.add_argument("--motion_diffusion_clip_sample", type=float, default=5.0, help="Motion diffusion sample clamp range used during inference")
+    parser.add_argument("--motion_diffusion_guidance_scale", type=float, default=1.5, help="Motion diffusion classifier-free guidance scale used during inference")
+    parser.add_argument("--motion_diffusion_timestep_spacing", choices=["leading", "linspace", "trailing", "full"], default="leading", help="Motion diffusion timestep spacing strategy used during inference")
+    parser.add_argument("--motion_diffusion_ddim_eta", type=float, default=0.0, help="Motion diffusion DDIM eta used during inference")
     parser.add_argument("--dyadic_n_heads", type=int, default=8, help="Dyadic ContinuousTransformer attention head count used when reconstructing the model for inference")
     parser.add_argument("--dyadic_dropout", type=float, default=0.1, help="Dyadic ContinuousTransformer dropout used when reconstructing the model for inference")
     parser.add_argument("--dyadic_video_chunk_size", type=int, default=8, help="Dyadic ContinuousTransformer video encoder chunk size for inference")
@@ -537,7 +657,8 @@ def main():
     label_npz = np.load(entry["flame_npz"])
     label_dir = os.path.dirname(entry["flame_npz"])
     checkpoint = _load_checkpoint(args.checkpoint, DEVICE)
-    checkpoint_family = _detect_checkpoint_family(checkpoint["model_state_dict"])
+    state_dict = checkpoint_state_dict(checkpoint)
+    checkpoint_family = _detect_checkpoint_family(state_dict)
 
     # Use label frame count if not overridden, so all params stay aligned
     n_frames = args.n_frames or label_npz["expr"].shape[0]
@@ -550,6 +671,23 @@ def main():
             args.checkpoint,
             n_frames,
             video_canvas_size=args.video_canvas_size,
+        )
+    elif checkpoint_family == "motion_diffusion":
+        results = predict_motion_diffusion(
+            args.seq_id,
+            args.checkpoint,
+            n_frames,
+            video_canvas_size=args.video_canvas_size,
+            n_heads=args.motion_diffusion_n_heads,
+            dropout=args.motion_diffusion_dropout,
+            train_timesteps=args.motion_diffusion_train_timesteps,
+            inference_timesteps=args.motion_diffusion_inference_timesteps,
+            beta_start=args.motion_diffusion_beta_start,
+            beta_end=args.motion_diffusion_beta_end,
+            clip_sample=args.motion_diffusion_clip_sample,
+            guidance_scale=args.motion_diffusion_guidance_scale,
+            timestep_spacing=args.motion_diffusion_timestep_spacing,
+            ddim_eta=args.motion_diffusion_ddim_eta,
         )
     elif checkpoint_family == "dyadic_dim":
         results = predict_dyadic_dim(
@@ -606,6 +744,13 @@ def main():
     for k in label_npz.keys():
         if k not in results:
             results[k] = label_npz[k]
+
+    if args.zero_rotation_translation:
+        for key in ("rotation", "translation"):
+            if key in results:
+                results[key] = np.zeros_like(results[key])
+            elif key in label_npz:
+                results[key] = np.zeros_like(label_npz[key])
 
     if args.gen_vis:
         # Pack into a per-sequence directory matching label layout
