@@ -387,6 +387,14 @@ def _resolve_target(batch: dict[str, torch.Tensor], target_dim: int) -> torch.Te
     return batch[flame_target_key(target_dim)]
 
 
+def _infer_target_dim(batch: dict[str, torch.Tensor]) -> int:
+    if "flame_target_118" in batch:
+        return batch["flame_target_118"].shape[-1]
+    if "flame_target_content" in batch:
+        return batch["flame_target_content"].shape[-1]
+    raise KeyError("REGNN expects flame_target_118 or flame_target_content in the batch")
+
+
 def build_regnn_clips(
     batch: dict[str, torch.Tensor],
     num_frames: int,
@@ -397,7 +405,8 @@ def build_regnn_clips(
     left_video = batch.get("left_video_frames", batch.get("left_video_feat"))
     if left_video is None:
         raise KeyError("REGNN expects left_video_frames or left_video_feat in the batch")
-    target = _resolve_target(batch, num_frames and target.shape[-1] if False else batch[flame_target_key(batch["flame_target_118"].shape[-1] if "flame_target_118" in batch else 118)].shape[-1])
+    target_dim = _infer_target_dim(batch)
+    target = _resolve_target(batch, target_dim)
     lengths = batch["lengths"]
 
     audio_clips = []
@@ -463,8 +472,10 @@ class REGNNLoss:
     vel_weight: float = 0.0
     w_exp: float = 2.0
     w_jaw: float = 2.0
+    w_rot: float = 1.0
     w_neck: float = 2.0
     w_eyes: float = 2.0
+    w_tran: float = 0.1
 
     def _all_thre_mse_loss(
         self,
@@ -504,17 +515,12 @@ class REGNNLoss:
             denom = valid_mask.sum().clamp_min(1.0) * value.shape[-1]
             return (value * valid_mask).sum() / denom
 
-        exp_loss = masked_mean(sq_error[:, :, :100])
-        jaw_loss = masked_mean(sq_error[:, :, 100:103])
-        neck_loss = masked_mean(sq_error[:, :, 103:106])
-        eyes_loss = masked_mean(sq_error[:, :, 106:112])
-        rec_loss = self.w_exp * exp_loss + self.w_jaw * jaw_loss + self.w_neck * neck_loss + self.w_eyes * eyes_loss
-        component_logs = {
-            "loss_exp": float(exp_loss.item()),
-            "loss_jaw": float(jaw_loss.item()),
-            "loss_neck": float(neck_loss.item()),
-            "loss_eyes": float(eyes_loss.item()),
-        }
+        component_logs: dict[str, float] = {}
+        rec_loss = prediction.new_tensor(0.0)
+        for name, component_slice in flame_component_layout(prediction.shape[-1]):
+            component_loss = masked_mean(sq_error[:, :, component_slice])
+            rec_loss = rec_loss + getattr(self, f"w_{name}") * component_loss
+            component_logs[f"loss_{name}"] = float(component_loss.item())
 
         return rec_loss, component_logs
 

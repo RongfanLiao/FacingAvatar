@@ -36,8 +36,8 @@ from manifest import load_manifest
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the LookingFace REGNN benchmark port")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--val_period", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--val_period", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=5e-4)
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
-    parser.add_argument("--predefined_splits_dir", type=str, default=None,
+    parser.add_argument("--predefined_splits_dir", type=str, default="data/LookingFace/dataset_splits",
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
     parser.add_argument("--resume_checkpoint", type=str, default=None,
                         help="Resume training from a saved checkpoint or raw state dict")

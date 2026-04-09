@@ -636,15 +636,17 @@ def _dtw_distance(sequence_a: np.ndarray, sequence_b: np.ndarray) -> float:
 
 
 def _motion_frd(pred_seq: np.ndarray, target_seq: np.ndarray) -> float:
-    """Motion-space FRD adapted from the baseline grouped DTW metric."""
+    """Full FLAME FRD over the 118-d target using grouped DTW by component."""
     groups = [
-        (0, 52, 1.0 / 52.0),
-        (52, 55, 1.0 / 3.0),
-        (55, 58, 1.0 / 3.0),
+        (component_slice.start, component_slice.stop, 1.0 / float(component_slice.stop - component_slice.start))
+        for _, component_slice in flame_component_layout(FLAME_118_DIM)
     ]
     total = 0.0
     for start, end, weight in groups:
-        total += weight * _dtw_distance(pred_seq[:, start:end].astype(np.float32), target_seq[:, start:end].astype(np.float32))
+        total += weight * _dtw_distance(
+            pred_seq[:, start:end].astype(np.float32), 
+            target_seq[:, start:end].astype(np.float32)
+        )
     return float(total)
 
 
@@ -658,7 +660,10 @@ def _content_frd(pred_seq: np.ndarray, target_seq: np.ndarray) -> float:
     ]
     total = 0.0
     for start, end, weight in groups:
-        total += weight * _dtw_distance(pred_seq[:, start:end].astype(np.float32), target_seq[:, start:end].astype(np.float32))
+        total += weight * _dtw_distance(
+            pred_seq[:, start:end].astype(np.float32), 
+            target_seq[:, start:end].astype(np.float32),
+        )
     return float(total)
 
 
@@ -674,7 +679,7 @@ def evaluate_motion_metrics(
     model,
     loader,
     device,
-    target_variant: str = "content",
+    target_variant: str = "full",
     use_amp: bool = False,
     eval_label: str = "val",
     log_interval: int = 1,
