@@ -218,12 +218,13 @@ def _infer_regnn_config(checkpoint_state: dict[str, torch.Tensor]) -> dict[str, 
         if len(parts) > 3 and parts[2].isdigit()
     }
     layers = max(layer_indices) + 1 if layer_indices else 2
-    if target_dim != FLAME_CONTENT_DIM:
+    if target_dim not in {FLAME_CONTENT_DIM, FLAME_118_DIM}:
         raise RuntimeError(f"Unsupported REGNN target dim: {target_dim}")
 
     return {
         "audio_dim": audio_dim,
         "fused_dim": fused_dim,
+        "target_dim": target_dim,
         "num_frames": num_frames,
         "edge_dim": edge_dim,
         "layers": layers,
@@ -498,10 +499,11 @@ def predict_regnn(
     ckpt = _load_checkpoint(checkpoint, device)
     state_dict = checkpoint_state_dict(ckpt)
     regnn_config = _infer_regnn_config(state_dict)
-    target_dim = FLAME_CONTENT_DIM
+    target_dim = int(regnn_config["target_dim"])
 
     model = LookingFaceREGNN(
         audio_dim=int(regnn_config["audio_dim"]),
+        target_dim=target_dim,
         fused_dim=int(regnn_config["fused_dim"]),
         num_frames=int(regnn_config["num_frames"]),
         edge_dim=int(regnn_config["edge_dim"]),
