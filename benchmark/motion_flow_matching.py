@@ -80,6 +80,7 @@ class FlowMatchingVelocityField(nn.Module):
         n_heads: int,
         num_layers: int,
         dropout: float,
+        video_chunk_size: int = 32,
         guidance_scale: float = 1.0,
         audio_drop_prob: float = 0.2,
         video_drop_prob: float = 0.2,
@@ -100,7 +101,7 @@ class FlowMatchingVelocityField(nn.Module):
             nn.GELU(),
             nn.Linear(feature_dim * 2, feature_dim),
         )
-        self.video_encoder = VideoEncoder(feature_dim=feature_dim)
+        self.video_encoder = VideoEncoder(feature_dim=feature_dim, chunk_size=video_chunk_size)
         self.audio_proj = nn.Linear(audio_dim, feature_dim)
         self.latent_proj = nn.Sequential(
             nn.Linear(feature_dim * 2, feature_dim),
@@ -270,6 +271,7 @@ class MotionFlowMatchingModel(nn.Module):
         n_heads: int = 8,
         num_layers: int = 4,
         dropout: float = 0.1,
+        video_chunk_size: int = 32,
         solver: str = "euler",
         solver_steps: int = 50,
         clip_sample: float = 5.0,
@@ -297,6 +299,7 @@ class MotionFlowMatchingModel(nn.Module):
             n_heads=n_heads,
             num_layers=num_layers,
             dropout=dropout,
+            video_chunk_size=video_chunk_size,
             guidance_scale=guidance_scale,
             audio_drop_prob=audio_drop_prob,
             video_drop_prob=video_drop_prob,
@@ -497,6 +500,8 @@ def train_motion_flow_matching(
     optimizer: torch.optim.Optimizer,
     criterion: FlowMatchingLoss,
     device: torch.device,
+    use_amp: bool = False,
+    scaler: torch.amp.GradScaler | None = None,
     grad_clip: float | None = 1.0,
     epoch: int | None = None,
     num_epochs: int | None = None,
@@ -516,25 +521,34 @@ def train_motion_flow_matching(
         lengths = batch["lengths"].to(device)
         padding_mask = batch["padding_mask"].to(device)
 
-        optimizer.zero_grad()
-        pred_velocity, aux = model(
-            left_audio_feat=left_audio,
-            left_video_frames=left_video,
-            lengths=lengths,
-            padding_mask=padding_mask,
-            target=target,
-        )
-        loss, logs = criterion(
-            pred_velocity=pred_velocity,
-            target_velocity=aux["target_velocity"],
-            pred_target=aux["pred_target"],
-            target=target,
-            padding_mask=padding_mask,
-        )
-        loss.backward()
-        if grad_clip is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            pred_velocity, aux = model(
+                left_audio_feat=left_audio,
+                left_video_frames=left_video,
+                lengths=lengths,
+                padding_mask=padding_mask,
+                target=target,
+            )
+            loss, logs = criterion(
+                pred_velocity=pred_velocity,
+                target_velocity=aux["target_velocity"],
+                pred_target=aux["pred_target"],
+                target=target,
+                padding_mask=padding_mask,
+            )
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if grad_clip is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         logs["mean_time"] = float(aux["times"].mean().item())
         for key, value in logs.items():
@@ -561,6 +575,7 @@ def validate_motion_flow_matching(
     loader,
     criterion: FlowMatchingLoss,
     device: torch.device,
+    use_amp: bool = False,
     epoch: int | None = None,
     num_epochs: int | None = None,
     eval_label: str = "val",
@@ -582,22 +597,23 @@ def validate_motion_flow_matching(
 
         times = torch.full((target.shape[0],), 0.5, device=device, dtype=torch.float32)
         source = torch.zeros_like(target)
-        pred_velocity, aux = model(
-            left_audio_feat=left_audio,
-            left_video_frames=left_video,
-            lengths=lengths,
-            padding_mask=padding_mask,
-            target=target,
-            times=times,
-            source=source,
-        )
-        _, logs = criterion(
-            pred_velocity=pred_velocity,
-            target_velocity=aux["target_velocity"],
-            pred_target=aux["pred_target"],
-            target=target,
-            padding_mask=padding_mask,
-        )
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            pred_velocity, aux = model(
+                left_audio_feat=left_audio,
+                left_video_frames=left_video,
+                lengths=lengths,
+                padding_mask=padding_mask,
+                target=target,
+                times=times,
+                source=source,
+            )
+            _, logs = criterion(
+                pred_velocity=pred_velocity,
+                target_velocity=aux["target_velocity"],
+                pred_target=aux["pred_target"],
+                target=target,
+                padding_mask=padding_mask,
+            )
         logs["mean_time"] = float(aux["times"].mean().item())
         for key, value in logs.items():
             totals[key] = totals.get(key, 0.0) + value
@@ -622,6 +638,7 @@ def evaluate_motion_flow_matching_metrics(
     model: MotionFlowMatchingModel,
     loader,
     device: torch.device,
+    use_amp: bool = False,
 ) -> dict[str, float]:
     """Run the shared benchmark metric stack on sampled flow-matching outputs."""
 
@@ -639,4 +656,5 @@ def evaluate_motion_flow_matching_metrics(
         loader,
         device=device,
         target_variant=flame_target_variant(model.target_dim),
+        use_amp=use_amp,
     )

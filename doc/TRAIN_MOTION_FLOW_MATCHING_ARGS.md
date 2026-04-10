@@ -21,12 +21,28 @@ python train_motion_flow_matching.py \
   --predefined_splits_dir data/LookingFace/dataset_splits \
   --checkpoint_dir checkpoints/motion_flow_matching_lookingface \
   --epochs 10 \
-  --batch_size 2 \
+  --batch_size 1 \
   --val_interval 2 \
   --video_canvas_size 224 \
+  --video_chunk_size 16 \
+  --amp \
   --solver heun \
   --solver_steps 40
 ```
+
+## Low-memory command
+
+```bash
+python train_motion_flow_matching.py \
+  --predefined_splits_dir data/LookingFace/dataset_splits \
+  --checkpoint_dir checkpoints/motion_flow_matching_lowmem \
+  --batch_size 1 \
+  --video_canvas_size 128 \
+  --video_chunk_size 8 \
+  --amp
+```
+
+This is the first configuration to try when training fails in the raw-video Conv3D path with a CUDA OOM.
 
 ## What this model is
 
@@ -88,6 +104,8 @@ Recommended starting values:
 - `128` or `224` for smoke tests
 - `224` or `400` for normal experimentation
 
+If you hit OOM in the video encoder, lowering `--video_canvas_size` is usually the fastest fix.
+
 ## Optimization args
 
 ### `--epochs`
@@ -104,7 +122,7 @@ Recommended starting values:
 ### `--batch_size`
 
 - Type: `int`
-- Default: `4`
+- Default: `1`
 
 ### `--lr`
 
@@ -155,6 +173,21 @@ Recommended starting values:
 
 - Type: `float`
 - Default: `0.1`
+
+### `--video_chunk_size`
+
+- Type: `int`
+- Default: `32`
+- Meaning: maximum number of frames processed at once by the raw-video Conv3D encoder
+
+Smaller values reduce peak GPU memory and are the most direct fix for OOM in the video path.
+
+### `--amp` / `--no_amp`
+
+- Default: `--amp`
+- Meaning: enable or disable CUDA automatic mixed precision for training, validation, and final metric evaluation
+
+Keep `--amp` enabled unless you are debugging numerical instability.
 
 ### `--clip_sample`
 

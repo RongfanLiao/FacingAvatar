@@ -44,6 +44,7 @@ def motion_flow_matching_model_config(args: argparse.Namespace) -> dict[str, obj
         "n_heads": args.n_heads,
         "num_layers": args.num_layers,
         "dropout": args.dropout,
+        "video_chunk_size": args.video_chunk_size,
         "solver": args.solver,
         "solver_steps": args.solver_steps,
         "clip_sample": args.clip_sample,
@@ -62,13 +63,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the LookingFace motion_flow_matching benchmark port")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--feature_dim", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--num_layers", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--video_chunk_size", type=int, default=32,
+                        help="Temporal chunk size for raw-video Conv3D encoding; smaller values reduce peak GPU memory")
     parser.add_argument("--solver", choices=["euler", "heun"], default="heun")
     parser.add_argument("--solver_steps", type=int, default=40)
     parser.add_argument("--clip_sample", type=float, default=5.0)
@@ -85,18 +88,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity_weight", type=float, default=0.0)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
-    parser.add_argument("--checkpoint_dir", default="checkpoints/motion_flow_matching_port")
+    parser.add_argument("--checkpoint_dir", default="checkpoints/motion_flow_matching")
     parser.add_argument("--split_path", default=default_benchmark_split_path())
-    parser.add_argument("--predefined_splits_dir", type=str, default=None,
+    parser.add_argument("--predefined_splits_dir", type=str, default="data/LookingFace/dataset_splits",
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
     parser.add_argument("--max_sequences", type=int, default=0)
     parser.add_argument("--max_eval_samples", type=int, default=None, help="Limit number of val samples for evaluation")
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
+    parser.add_argument("--amp", dest="amp", action="store_true",
+                        help="Use CUDA automatic mixed precision during training, validation, and metric evaluation")
+    parser.add_argument("--no_amp", dest="amp", action="store_false",
+                        help="Disable CUDA automatic mixed precision")
     parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     parser.add_argument("--resume_checkpoint", type=str, default=None,
                         help="Resume training from a saved checkpoint or raw state dict")
+    parser.set_defaults(amp=True)
     return parser.parse_args()
 
 
@@ -132,6 +140,7 @@ def make_loader(
 def main() -> None:
     args = parse_args()
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    use_amp = bool(args.amp and device.type == "cuda")
     eval_label = "val"
     manifest = load_manifest()
 
@@ -200,6 +209,7 @@ def main() -> None:
         n_heads=args.n_heads,
         num_layers=args.num_layers,
         dropout=args.dropout,
+        video_chunk_size=args.video_chunk_size,
         solver=args.solver,
         solver_steps=args.solver_steps,
         clip_sample=args.clip_sample,
@@ -218,6 +228,7 @@ def main() -> None:
         velocity_weight=args.velocity_weight,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     model_config = motion_flow_matching_model_config(args)
     best_path = os.path.join(args.checkpoint_dir, "best.pt")
     start_epoch = 0
@@ -259,6 +270,8 @@ def main() -> None:
                 optimizer,
                 criterion,
                 device=device,
+                use_amp=use_amp,
+                scaler=scaler,
                 grad_clip=args.grad_clip,
                 epoch=epoch,
                 num_epochs=args.epochs,
@@ -277,6 +290,7 @@ def main() -> None:
                     val_loader,
                     criterion,
                     device=device,
+                    use_amp=use_amp,
                     epoch=epoch,
                     num_epochs=args.epochs,
                     eval_label=eval_label,
@@ -300,7 +314,7 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_flow_matching_metrics(model, val_loader, device=device)
+    metric_results = evaluate_motion_flow_matching_metrics(model, val_loader, device=device, use_amp=use_amp)
     metric_results["target_variant"] = flame_target_variant(model.target_dim)
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
