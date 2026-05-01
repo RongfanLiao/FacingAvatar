@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the LookingFace motion_diffusion benchmark port")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--feature_dim", type=int, default=256)
@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--checkpoint_dir", default="checkpoints/motion_diffusion_port")
     parser.add_argument("--split_path", default=default_benchmark_split_path())
-    parser.add_argument("--predefined_splits_dir", type=str, default=None,
+    parser.add_argument("--predefined_splits_dir", type=str, default="data/LookingFace/dataset_splits",
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
     parser.add_argument("--max_sequences", type=int, default=0)
     parser.add_argument("--max_eval_samples", type=int, default=None, help="Limit number of val samples for evaluation")

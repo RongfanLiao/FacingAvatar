@@ -18,7 +18,7 @@ CKPT_DIR = os.path.join(BASE_DIR, "checkpoints")
 
 # ── Video specs ──────────────────────────────────────────────────────────────
 VIDEO_FPS = 25             # Documentary video frame rate
-VIDEO_CANVAS_SIZE = 400    # Fit frames into NxN canvas by longer side
+VIDEO_CANVAS_SIZE = 300    # Fit frames into NxN canvas by longer side
 
 # ── Input dimensions ──────────────────────────────────────────────────────────
 WHISPER_DIM = 1280       # Whisper-Large-v3 encoder hidden size
