@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train motion-only TransVAE with raw video + wav2vec")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--feature_dim", type=int, default=128)
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--max_seq_len", type=int, default=1024)
@@ -50,9 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
     parser.add_argument("--documentary", action="store_true", help="Use documentary data manifest")
     parser.add_argument("--max_eval_samples", type=int, default=None, help="Limit number of val samples for evaluation")
-    parser.add_argument("--predefined_splits_dir", type=str, default=None,
+    parser.add_argument("--predefined_splits_dir", type=str, default="data/LookingFace/dataset_splits",
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
-    parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
+    parser.add_argument("--val_interval", type=int, default=4, help="Validate every N epochs")
     parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     parser.add_argument("--resume_checkpoint", type=str, default=None,
                         help="Resume training from a saved checkpoint or raw state dict")
