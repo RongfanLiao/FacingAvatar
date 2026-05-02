@@ -395,6 +395,8 @@ def evaluate_listenformer_metrics(
     loader,
     device: torch.device,
     use_amp: bool = False,
+    reference_seq_ids: list[str] | None = None,
+    manifest: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, float]:
     """Evaluate the ListenFormer port with the shared motion metrics stack."""
 
@@ -419,4 +421,6 @@ def evaluate_listenformer_metrics(
         device=device,
         target_variant=flame_target_variant(model.output_dim),
         use_amp=use_amp,
+        reference_seq_ids=reference_seq_ids,
+        manifest=manifest,
     )

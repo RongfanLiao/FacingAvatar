@@ -15,8 +15,8 @@ The recommended minimal benchmark contains the following six metrics:
 2. RMSE
 3. FID△fm
 4. SND
-5. frcorr
-6. frdist
+5. frcorr_type
+6. frdist_type
 
 ## 2. Why These Metrics Form a Strong Minimal Set
 
@@ -28,8 +28,8 @@ This benchmark is intentionally small, but each metric covers a different failur
 | RMSE | Are there large motion errors or unstable failures? | Motion robustness |
 | FID△fm | Are frame-to-frame motion changes realistic? | Temporal realism |
 | SND | Does the overall motion sequence look natural? | Sequence realism |
-| frcorr | Does the predicted motion trajectory covary with the paired target? | Temporal agreement |
-| frdist | Is the predicted motion path close to the paired target even with timing offsets? | Trajectory alignment |
+| frcorr_type | Does the predicted motion trajectory match any appropriate reaction trajectory for the same content type and reaction type? | Reaction appropriateness |
+| frdist_type | Is the predicted motion path close to at least one appropriate reaction even with timing offsets? | Reaction appropriateness |
 
 Together, these metrics cover reconstruction quality, temporal behavior, and paired sequence agreement. That is enough to support a strong evaluation section without overloading the paper with metrics that answer unrelated questions such as lip-sync or identity preservation.
 
@@ -193,35 +193,37 @@ In practice for this repo, the important point is to compute SND over full FLAME
 1. Fine-grained semantic fit to the content
 2. Visual rendering quality
 
-### 3.5 frcorr
+### 3.5 frcorr_type
 
 #### What it is
 
-`frcorr` is a frame-sequence correlation score derived from the concordance correlation coefficient (CCC) between predicted and ground-truth motion trajectories.
+`frcorr_type` is a type-conditioned frame-sequence correlation score derived from the concordance correlation coefficient (CCC) between a predicted motion trajectory and the most correlated appropriate training-set reaction trajectory.
 
 #### How it is computed
 
 For each validation sequence:
 
-1. Take the predicted FLAME sequence and the paired ground-truth FLAME sequence.
-2. For each output dimension, compute the concordance correlation coefficient:
+1. Determine the sample's content type and dominant reaction type.
+2. Build the appropriate set from training-split reactions that share the same content type and dominant reaction type.
+3. For each candidate reference in that set, compute the concordance correlation coefficient:
 
 $$
 \operatorname{CCC}(x, y) = \frac{2\rho\sigma_x\sigma_y}{\sigma_x^2 + \sigma_y^2 + (\mu_x - \mu_y)^2}
 $$
 
-3. Average the per-dimension CCC values.
-4. Average the per-sequence results over the evaluation split.
+4. Average the per-dimension CCC values for each candidate reference.
+5. Keep the maximum candidate CCC.
+6. Average the per-sequence results over the evaluation split.
 
 #### Why it is suitable
 
-1. It checks whether the predicted motion follows the same temporal trend as the paired target.
+1. It checks whether the predicted motion follows the temporal trend of at least one reaction that is appropriate for the same content type and reaction type.
 2. It is stricter than simple correlation because it also penalizes mean and scale mismatch.
 3. It stays in FLAME space, which matches the model output space directly.
 
 #### What it captures well
 
-1. Temporal agreement with the paired target
+1. Temporal agreement with an appropriate target reaction
 2. Whether rises and falls in motion happen in the right pattern
 3. Similarity of trajectory shape, mean, and variance
 
@@ -230,26 +232,28 @@ $$
 1. Distribution-level realism across the whole dataset
 2. Large local misalignments that could still preserve broad trend agreement
 
-### 3.6 frdist
+### 3.6 frdist_type
 
 #### What it is
 
-`frdist` is a trajectory-distance metric built from grouped Dynamic Time Warping (DTW) comparisons between predicted and ground-truth FLAME sequences.
+`frdist_type` is a type-conditioned trajectory-distance metric built from grouped Dynamic Time Warping (DTW) comparisons between a predicted FLAME sequence and the closest appropriate training-set reaction sequence.
 
 #### How it is computed
 
 For each validation sequence:
 
-1. Split the FLAME target into meaningful groups.
-2. For each group, compute a DTW distance between the predicted sequence and the paired ground-truth sequence.
-3. Weight the group distances and sum them.
-4. Average over the evaluation set.
+1. Determine the sample's content type and dominant reaction type.
+2. Build the appropriate set from training-split reactions that share the same content type and dominant reaction type.
+3. Split the FLAME target into meaningful groups.
+4. For each candidate reference in the appropriate set, compute the grouped DTW distance between the predicted sequence and that reference.
+5. Keep the minimum candidate distance.
+6. Average over the evaluation set.
 
 Conceptually, this measures the minimum alignment cost between two motion trajectories while allowing small timing shifts.
 
 #### Why it is suitable
 
-1. It captures path-level similarity rather than only framewise error.
+1. It captures path-level similarity to an appropriate reaction rather than only to the paired target.
 2. It is more tolerant to slight timing offsets than strict per-frame metrics.
 3. It is useful for motion sequences where two reactions may be similar but slightly phase-shifted in time.
 
@@ -278,7 +282,7 @@ The minimal benchmark follows exactly this logic:
 |---|---|
 | Paired motion correctness | MAE, RMSE |
 | Temporal naturalness | FID△fm, SND |
-| Paired trajectory agreement | frcorr, frdist |
+| Reaction appropriateness | frcorr_type, frdist_type |
 
 This is why the benchmark is both minimal and strong. It does not waste space on metrics that are mainly about lip articulation, identity preservation, unrelated synchrony definitions, or rendering-heavy side tasks.
 

@@ -336,7 +336,11 @@ class MotionDiffusionModel(nn.Module):
         self.register_buffer("alpha_bars", alpha_bars)
         self.register_buffer("sqrt_alpha_bars", torch.sqrt(alpha_bars))
         self.register_buffer("sqrt_one_minus_alpha_bars", torch.sqrt(1.0 - alpha_bars))
-        self.register_buffer("indices", torch.from_numpy(build_inference_indices(train_timesteps, self.inference_timesteps, timestep_spacing)))
+        self.register_buffer(
+            "indices",
+            torch.from_numpy(build_inference_indices(train_timesteps, self.inference_timesteps, timestep_spacing)),
+            persistent=False,
+        )
 
     def q_sample(self, x_start: torch.Tensor, timesteps: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         scale_clean = self.sqrt_alpha_bars[timesteps].view(-1, 1, 1)
@@ -619,6 +623,8 @@ def evaluate_motion_diffusion_metrics(
     model: MotionDiffusionModel,
     loader,
     device: torch.device,
+    reference_seq_ids: list[str] | None = None,
+    manifest: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, float]:
     """Run the shared benchmark metric stack on sampled diffusion outputs."""
 
@@ -636,4 +642,6 @@ def evaluate_motion_diffusion_metrics(
         loader,
         device=device,
         target_variant=flame_target_variant(model.target_dim),
+        reference_seq_ids=reference_seq_ids,
+        manifest=manifest,
     )

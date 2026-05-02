@@ -254,7 +254,14 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_listenformer_metrics(model, val_loader, device=device, use_amp=use_amp)
+    metric_results = evaluate_listenformer_metrics(
+        model,
+        val_loader,
+        device=device,
+        use_amp=use_amp,
+        reference_seq_ids=train_seqs,
+        manifest=manifest,
+    )
     metric_results["target_variant"] = "content"
     metric_results["evaluation_split"] = eval_label
     metric_results.update({

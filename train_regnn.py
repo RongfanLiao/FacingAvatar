@@ -263,7 +263,13 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_regnn_metrics(model, val_loader, device=device)
+    metric_results = evaluate_regnn_metrics(
+        model,
+        val_loader,
+        device=device,
+        reference_seq_ids=train_seqs,
+        manifest=manifest,
+    )
     metric_results["target_variant"] = "content"
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)

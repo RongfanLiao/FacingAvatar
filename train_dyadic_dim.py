@@ -248,6 +248,8 @@ def main() -> None:
         val_loader,
         device=device,
         use_amp=use_amp,
+        reference_seq_ids=train_seqs,
+        manifest=manifest,
     )
     metric_results["target_variant"] = "content"
     metric_results["evaluation_split"] = eval_label

@@ -314,7 +314,14 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_flow_matching_metrics(model, val_loader, device=device, use_amp=use_amp)
+    metric_results = evaluate_motion_flow_matching_metrics(
+        model,
+        val_loader,
+        device=device,
+        use_amp=use_amp,
+        reference_seq_ids=train_seqs,
+        manifest=manifest,
+    )
     metric_results["target_variant"] = flame_target_variant(model.target_dim)
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)

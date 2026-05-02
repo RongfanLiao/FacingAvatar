@@ -639,6 +639,8 @@ def evaluate_motion_flow_matching_metrics(
     loader,
     device: torch.device,
     use_amp: bool = False,
+    reference_seq_ids: list[str] | None = None,
+    manifest: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, float]:
     """Run the shared benchmark metric stack on sampled flow-matching outputs."""
 
@@ -657,4 +659,6 @@ def evaluate_motion_flow_matching_metrics(
         device=device,
         target_variant=flame_target_variant(model.target_dim),
         use_amp=use_amp,
+        reference_seq_ids=reference_seq_ids,
+        manifest=manifest,
     )

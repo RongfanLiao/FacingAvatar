@@ -88,6 +88,55 @@ Useful notes:
 - the script only uses samples that have a valid manifest entry, right-side FLAME target, right MP4, and wav2vec feature file
 - final metrics are written to `checkpoints/motion_transvae_lookingface_predefined/metrics.json`
 
+### Run draft reaction annotation on paired LookingFace clips
+
+Use `tools/annotate_reactions_vlm.py` to generate draft HRNC reaction-type annotations for the `right` videos in `data/LookingFace`.
+
+This workflow:
+
+- reads paired `left_mp4` and `right_mp4` entries from `data/manifest.json`
+- derives `content_type` from the LookingFace top-level folder (`documentary`, `game`, `movie`, `music`, `sports`, `talk show`)
+- runs a local VLM with the prompt in `HRNC_reaction_type_vlm_prompt_template.md`
+- writes one JSON result per clip to `data/reaction_annotations/`
+
+Recommended environment:
+
+```bash
+conda activate avatar
+```
+
+Run the default 24-clip pilot:
+
+```bash
+python tools/annotate_reactions_vlm.py --pilot --device cuda:0
+```
+
+Inspect the selected pilot clips without running inference:
+
+```bash
+python tools/annotate_reactions_vlm.py --pilot --dry_run
+```
+
+Restrict the pilot to specific categories:
+
+```bash
+python tools/annotate_reactions_vlm.py --pilot --categories documentary movie sports
+```
+
+Annotate all eligible clips instead of the pilot subset:
+
+```bash
+python tools/annotate_reactions_vlm.py --all --device cuda:0
+```
+
+Useful notes:
+
+- the current implementation supports the local `qwen2_5_vl` backend only, but keeps `--model_id` configurable
+- existing annotation JSON files are skipped unless `--overwrite` is set
+- malformed model output is saved as an error record for the clip instead of aborting the whole batch
+- the saved JSON includes the parsed annotation, the raw model response, and provenance fields for review
+- these labels are draft annotations and should be validated by a human before downstream use
+
 ### Use prepared embeddings and labels
 
 If `data/audio_embeddings`, `data/video_embeddings`, and `data/video_labels` are already populated:

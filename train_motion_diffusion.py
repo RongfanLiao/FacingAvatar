@@ -66,6 +66,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_eval_samples", type=int, default=None, help="Limit number of val samples for evaluation")
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--fast_eval", action="store_true",
+                        help="Use a reduced diffusion step count for faster evaluation runs")
+    parser.add_argument("--fast_eval_timesteps", type=int, default=10,
+                        help="Reverse diffusion steps to use when --fast_eval is enabled")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
     parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     parser.add_argument("--resume_checkpoint", type=str, default=None,
@@ -104,6 +108,15 @@ def make_loader(
 
 def main() -> None:
     args = parse_args()
+    if args.fast_eval:
+        if args.fast_eval_timesteps <= 0:
+            raise ValueError("--fast_eval_timesteps must be positive")
+        original_inference_timesteps = args.inference_timesteps
+        args.inference_timesteps = min(args.inference_timesteps, args.fast_eval_timesteps)
+        print(
+            "Fast eval enabled: "
+            f"inference_timesteps {original_inference_timesteps} -> {args.inference_timesteps}"
+        )
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     eval_label = "val"
     manifest = load_manifest()
@@ -112,7 +125,7 @@ def main() -> None:
         splits = load_predefined_splits(
             splits_dir=args.predefined_splits_dir,
             manifest=manifest,
-            require_wav2vec_audio=True,
+            require_wav2vec_audio=not args.eval_only,
         )
         train_seqs = splits.get("train", [])
         if "test" in splits:
@@ -143,14 +156,16 @@ def main() -> None:
             f"No {eval_label} sequences available. Check the predefined split files and required embeddings."
         )
 
-    train_loader = make_loader(
-        train_seqs,
-        args.batch_size,
-        args.num_workers,
-        shuffle=True,
-        video_canvas_size=args.video_canvas_size,
-        manifest=manifest,
-    )
+    train_loader = None
+    if not args.eval_only:
+        train_loader = make_loader(
+            train_seqs,
+            args.batch_size,
+            args.num_workers,
+            shuffle=True,
+            video_canvas_size=args.video_canvas_size,
+            manifest=manifest,
+        )
     val_loader = make_loader(
         val_seqs,
         args.batch_size,
@@ -261,7 +276,13 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_diffusion_metrics(model, val_loader, device=device)
+    metric_results = evaluate_motion_diffusion_metrics(
+        model,
+        val_loader,
+        device=device,
+        reference_seq_ids=train_seqs,
+        manifest=manifest,
+    )
     metric_results["target_variant"] = "content"
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)

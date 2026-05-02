@@ -258,6 +258,8 @@ def main() -> None:
         device=device,
         target_variant=flame_target_variant(output_dim),
         use_amp=use_amp,
+        reference_seq_ids=train_seqs,
+        manifest=manifest,
     )
     metric_results["target_variant"] = flame_target_variant(output_dim)
     # metric_results["evaluation_split"] = eval_label

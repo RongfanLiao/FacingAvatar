@@ -14,8 +14,8 @@ from pathlib import Path
 DEFAULT_METRICS = [
     "mae",
     "rmse",
-    "frcorr",
-    "frdist",
+    "frcorr_type",
+    "frdist_type",
     # "delta_mae",
     # "delta_rmse",
     "fid_delta_fm",

@@ -77,6 +77,26 @@ Useful only for debugging or convergence checks.
 
 Useful when a checkpoint already exists in `--checkpoint_dir`.
 
+### `--fast_eval`
+
+- Flag
+- Default: `False`
+- Meaning: use a reduced reverse diffusion step count for a faster evaluation run
+
+This is a convenience switch for evaluation-heavy workflows. It leaves the model weights unchanged and simply reduces the number of sampling steps used at inference time.
+
+### `--fast_eval_timesteps`
+
+- Type: `int`
+- Default: `10`
+- Meaning: reverse diffusion steps to use when `--fast_eval` is enabled
+
+When `--fast_eval` is active, the effective `--inference_timesteps` becomes:
+
+```text
+min(inference_timesteps, fast_eval_timesteps)
+```
+
 ### `--video_canvas_size`
 
 - Type: `int`
@@ -197,6 +217,7 @@ Larger values more closely match standard DDPM-style setups, but increase diffus
 - Meaning: number of reverse sampling steps used during evaluation / generation
 
 Lower values make evaluation faster.
+If `--fast_eval` is enabled, this value is capped by `--fast_eval_timesteps`.
 
 ### `--beta_start`
 
@@ -350,6 +371,19 @@ python train_motion_diffusion.py \
   --train_timesteps 200 \
   --inference_timesteps 20 \
   --max_sequences 32
+```
+
+## Fast eval-only checkpoint test
+
+```bash
+python train_motion_diffusion.py \
+  --eval_only \
+  --resume_checkpoint checkpoints/motion_diffusion_port/best.pt \
+  --checkpoint_dir checkpoints/motion_diffusion_port_fast_eval \
+  --batch_size 1 \
+  --num_workers 0 \
+  --fast_eval \
+  --fast_eval_timesteps 10
 ```
 
 ## Full training starting point

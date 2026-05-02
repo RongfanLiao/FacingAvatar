@@ -256,8 +256,8 @@ The final metric report comes from `evaluate_motion_metrics(...)` and includes:
 
 - MAE / RMSE
 - feature-wise MAE / RMSE by target group
-- concordance correlation (`frcorr`)
-- motion distance (`frdist`)
+- type-conditioned concordance correlation (`frcorr_type`)
+- type-conditioned motion distance (`frdist_type`)
 - temporal-delta metrics
 - Fréchet-style distribution metrics where applicable
 

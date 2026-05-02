@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import os
 import time
+import json
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
@@ -13,8 +15,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from benchmark.targets import FLAME_118_DIM, FLAME_CONTENT_DIM, flame_component_layout, flame_target_key, flame_target_variant
-from config import VIDEO_CANVAS_SIZE, WAV2VEC_DIM
+from benchmark.targets import FLAME_118_DIM, FLAME_CONTENT_DIM, flame_component_layout, flame_npz_to_targets, flame_target_key, flame_target_variant
+from config import REACTION_ANNOTATIONS_DIR, VIDEO_CANVAS_SIZE, WAV2VEC_DIM
 
 
 def lengths_to_mask(lengths: torch.Tensor, max_len: int | None = None) -> torch.Tensor:
@@ -674,6 +676,96 @@ def _stack_valid_sequences(items: Iterable[np.ndarray], feature_dim: int) -> np.
     return np.concatenate(arrays, axis=0)
 
 
+def _resample_sequence_length(sequence: np.ndarray, target_length: int) -> np.ndarray:
+    """Linearly resample a temporal sequence to a target number of frames."""
+    if sequence.shape[0] == target_length:
+        return sequence
+    if target_length <= 0:
+        raise ValueError("target_length must be positive")
+    if sequence.shape[0] == 0:
+        raise ValueError("Cannot resample an empty sequence")
+    if sequence.shape[0] == 1:
+        return np.repeat(sequence, target_length, axis=0)
+
+    src_positions = np.linspace(0, sequence.shape[0] - 1, num=sequence.shape[0], dtype=np.float32)
+    dst_positions = np.linspace(0, sequence.shape[0] - 1, num=target_length, dtype=np.float32)
+    resampled = [np.interp(dst_positions, src_positions, sequence[:, dim]) for dim in range(sequence.shape[1])]
+    return np.stack(resampled, axis=1).astype(np.float32)
+
+
+def _normalize_content_type(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower().replace("_", " ")
+    return normalized or None
+
+
+def _load_reaction_annotation(seq_id: str, annotations_dir: str) -> dict[str, object] | None:
+    path = os.path.join(annotations_dir, f"{seq_id}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _annotation_bucket_key(seq_id: str, annotations_dir: str) -> tuple[str | None, str | None]:
+    record = _load_reaction_annotation(seq_id, annotations_dir)
+    if not record or record.get("status") != "ok":
+        return None, None
+
+    sample = record.get("sample")
+    annotation = record.get("annotation")
+    if not isinstance(sample, dict) or not isinstance(annotation, dict):
+        return None, None
+
+    content_type = _normalize_content_type(sample.get("content_type"))
+    dominant = str(annotation.get("dominant_reaction_type", "")).strip().upper()
+    if dominant not in set("ABCDEFGH"):
+        return content_type, None
+    return content_type, dominant
+
+
+def _build_appropriate_reference_sets(
+    reference_seq_ids: list[str],
+    manifest: dict[str, dict[str, str]],
+    target_key: str,
+    annotations_dir: str,
+) -> tuple[dict[tuple[str, str], list[np.ndarray]], dict[str, int]]:
+    grouped: dict[tuple[str, str], list[np.ndarray]] = defaultdict(list)
+    stats = {
+        "reference_candidates": 0,
+        "reference_with_annotations": 0,
+        "reference_with_bucket": 0,
+        "reference_sequences_loaded": 0,
+    }
+
+    for seq_id in reference_seq_ids:
+        stats["reference_candidates"] += 1
+        content_type, dominant = _annotation_bucket_key(seq_id, annotations_dir)
+        if content_type is None:
+            continue
+        stats["reference_with_annotations"] += 1
+        if dominant is None:
+            continue
+        stats["reference_with_bucket"] += 1
+
+        entry = manifest.get(seq_id)
+        if entry is None:
+            continue
+        flame_npz = entry.get("flame_npz")
+        if not flame_npz or not os.path.exists(flame_npz):
+            continue
+
+        targets = flame_npz_to_targets(flame_npz)
+        grouped[(content_type, dominant)].append(np.asarray(targets[target_key], dtype=np.float32))
+        stats["reference_sequences_loaded"] += 1
+
+    return grouped, stats
+
+
 @torch.no_grad()
 def evaluate_motion_metrics(
     model,
@@ -683,6 +775,9 @@ def evaluate_motion_metrics(
     use_amp: bool = False,
     eval_label: str = "val",
     log_interval: int = 1,
+    reference_seq_ids: list[str] | None = None,
+    manifest: dict[str, dict[str, str]] | None = None,
+    reaction_annotations_dir: str = REACTION_ANNOTATIONS_DIR,
 ) -> dict[str, float]:
     """Compute paired motion metrics for the evaluation split."""
     model.eval()
@@ -693,10 +788,12 @@ def evaluate_motion_metrics(
     delta_target = []
     seq_desc_pred = []
     seq_desc_target = []
-    frc_list = []
-    frd_list = []
+    frcorr_type_list = []
+    frdist_type_list = []
     evaluated_sequences = 0
     evaluated_frames = 0
+    type_metric_candidates = 0
+    type_metric_evaluated = 0
 
     if target_variant == "full":
         target_key = "flame_target_118"
@@ -708,6 +805,23 @@ def evaluate_motion_metrics(
         frd_func = _content_frd
     else:
         raise ValueError(f"Unsupported target variant: {target_variant}")
+
+    appropriate_reference_sets: dict[tuple[str, str], list[np.ndarray]] = {}
+    reference_stats = {
+        "reference_candidates": 0,
+        "reference_with_annotations": 0,
+        "reference_with_bucket": 0,
+        "reference_sequences_loaded": 0,
+    }
+    if reference_seq_ids:
+        if manifest is None:
+            raise ValueError("manifest is required when reference_seq_ids are provided")
+        appropriate_reference_sets, reference_stats = _build_appropriate_reference_sets(
+            reference_seq_ids=reference_seq_ids,
+            manifest=manifest,
+            target_key=target_key,
+            annotations_dir=reaction_annotations_dir,
+        )
 
     total_batches = len(loader)
     eval_start_time = time.perf_counter()
@@ -723,6 +837,7 @@ def evaluate_motion_metrics(
             prediction, _ = model(left_audio, left_video, lengths=lengths, padding_mask=padding_mask)
 
         for sample_idx, length in enumerate(lengths.tolist()):
+            seq_id = str(batch["seq_ids"][sample_idx])
             pred_seq = prediction[sample_idx, :length].detach().cpu().numpy().astype(np.float32)
             target_seq = target[sample_idx, :length].detach().cpu().numpy().astype(np.float32)
             if pred_seq.size == 0:
@@ -731,8 +846,24 @@ def evaluate_motion_metrics(
             diff = pred_seq - target_seq
             abs_errors.append(np.abs(diff))
             sq_errors.append(diff ** 2)
-            frc_list.append(_concordance_correlation_coefficient(target_seq, pred_seq))
-            frd_list.append(frd_func(pred_seq, target_seq))
+
+            content_type, dominant = _annotation_bucket_key(seq_id, reaction_annotations_dir)
+            if content_type is not None and dominant is not None:
+                type_metric_candidates += 1
+                references = appropriate_reference_sets.get((content_type, dominant), [])
+                if references:
+                    frcorr_type_list.append(max(
+                        _concordance_correlation_coefficient(
+                            _resample_sequence_length(reference_seq, pred_seq.shape[0]),
+                            pred_seq,
+                        )
+                        for reference_seq in references
+                    ))
+                    frdist_type_list.append(min(
+                        frd_func(pred_seq, reference_seq)
+                        for reference_seq in references
+                    ))
+                    type_metric_evaluated += 1
 
             pred_delta = np.diff(pred_seq, axis=0)
             target_delta_seq = np.diff(target_seq, axis=0)
@@ -777,9 +908,15 @@ def evaluate_motion_metrics(
     metrics = {
         "mae": float(abs_errors_arr.mean()),
         "rmse": float(np.sqrt(sq_errors_arr.mean())),
-        "frcorr": float(np.mean(frc_list)),
-        "frdist": float(np.mean(frd_list)),
+        "frcorr_type": float(np.mean(frcorr_type_list)) if frcorr_type_list else float("nan"),
+        "frdist_type": float(np.mean(frdist_type_list)) if frdist_type_list else float("nan"),
+        "frcorr": float(np.mean(frcorr_type_list)) if frcorr_type_list else float("nan"),
+        "frdist": float(np.mean(frdist_type_list)) if frdist_type_list else float("nan"),
     }
+    metrics.update(reference_stats)
+    metrics["appropriate_set_count"] = float(len(appropriate_reference_sets))
+    metrics["type_metric_candidates"] = float(type_metric_candidates)
+    metrics["type_metric_evaluated"] = float(type_metric_evaluated)
 
     for name, component_slice in flame_component_layout(feature_dim):
         metrics[f"mae_{name}"] = float(abs_errors_arr[:, component_slice].mean())
@@ -841,10 +978,14 @@ def checkpoint_state_dict(checkpoint: dict[str, object]) -> dict[str, torch.Tens
     """Extract model weights from either a full training checkpoint or a raw state dict."""
     state_dict = checkpoint.get("model_state_dict")
     if isinstance(state_dict, dict):
-        return state_dict
+        filtered_state_dict = dict(state_dict)
+        filtered_state_dict.pop("indices", None)
+        return filtered_state_dict
 
     if checkpoint and all(isinstance(value, torch.Tensor) for value in checkpoint.values()):
-        return checkpoint  # type: ignore[return-value]
+        filtered_state_dict = dict(checkpoint)
+        filtered_state_dict.pop("indices", None)
+        return filtered_state_dict  # type: ignore[return-value]
 
     raise RuntimeError("Checkpoint does not contain a model state dict")
 

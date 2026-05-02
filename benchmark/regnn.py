@@ -677,6 +677,8 @@ def evaluate_regnn_metrics(
     model: LookingFaceREGNN,
     loader,
     device: torch.device,
+    reference_seq_ids: list[str] | None = None,
+    manifest: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, float]:
     """Run shared motion metrics on full-sequence REGNN predictions."""
 
@@ -690,4 +692,10 @@ def evaluate_regnn_metrics(
             prediction = self.inner.predict_sequence(left_audio_feat, left_video_feat, lengths)
             return prediction, None
 
-    return evaluate_motion_metrics(_REGNNWrapper(model), loader, device=device)
+    return evaluate_motion_metrics(
+        _REGNNWrapper(model),
+        loader,
+        device=device,
+        reference_seq_ids=reference_seq_ids,
+        manifest=manifest,
+    )
