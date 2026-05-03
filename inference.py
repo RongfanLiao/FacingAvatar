@@ -18,7 +18,7 @@ import shutil
 
 import numpy as np
 import torch
-from scipy.ndimage import uniform_filter1d
+from scipy.ndimage import median_filter, uniform_filter1d
 from torch.nn.utils.rnn import pad_sequence
 
 from benchmark.lookingface import _fit_frame_to_canvas
@@ -252,7 +252,7 @@ def _infer_motion_diffusion_config(checkpoint_state: dict[str, torch.Tensor]) ->
     }
     num_layers = max(encoder_layer_indices | decoder_layer_indices) + 1 if (encoder_layer_indices or decoder_layer_indices) else 4
 
-    if output_dim != FLAME_CONTENT_DIM:
+    if output_dim not in {FLAME_CONTENT_DIM, FLAME_118_DIM}:
         raise RuntimeError(f"Unsupported motion diffusion output dim: {output_dim}")
 
     return {
@@ -391,6 +391,28 @@ def _motion_prediction_to_flame(prediction: np.ndarray, label_npz: np.lib.npyio.
         return results
 
     raise RuntimeError(f"Unsupported motion prediction output dim: {output_dim}")
+
+
+def _stabilize_pose_tracks(
+    results: dict[str, np.ndarray],
+    noise_window: int,
+    smooth_window: int,
+    keys: tuple[str, ...] = ("rotation", "translation"),
+) -> None:
+    if noise_window <= 1 and smooth_window <= 1:
+        return
+
+    for key in keys:
+        values = results.get(key)
+        if values is None or values.ndim == 0 or values.shape[0] <= 1:
+            continue
+
+        stabilized = values.astype(np.float32, copy=False)
+        if noise_window > 1:
+            stabilized = median_filter(stabilized, size=(noise_window, 1), mode="nearest")
+        if smooth_window > 1:
+            stabilized = uniform_filter1d(stabilized, size=smooth_window, axis=0, mode="nearest")
+        results[key] = stabilized.astype(values.dtype, copy=False)
 
 
 def predict_motion_flow_matching(
@@ -725,6 +747,7 @@ def predict_motion_diffusion(
 
     model = MotionDiffusionModel(
         audio_dim=int(diffusion_config["audio_dim"]),
+        target_dim=int(diffusion_config["output_dim"]),
         feature_dim=int(diffusion_config["feature_dim"]),
         n_heads=n_heads,
         num_layers=int(diffusion_config["num_layers"]),
@@ -774,12 +797,14 @@ def main():
     parser.add_argument("--output_dir", type=str, default="work_dir/predicted", help="Output directory")
     parser.add_argument("--gen_vis", action="store_true", help="Pack output into a per-sequence dir with foreground_image.png and transforms.json for visualization")
     parser.add_argument("--smooth", type=int, default=5, help="Temporal smoothing window size (0=disabled)")
+    parser.add_argument("--pose_noise_filter", type=int, default=5, help="Median-filter window used to remove rotation/translation spikes before export (<=1 disables it)")
+    parser.add_argument("--pose_smooth", type=int, default=9, help="Additional smoothing window applied to rotation/translation before export (<=1 disables it)")
     parser.add_argument(
         "--zero_rotation_translation",
         action="store_true",
         help="Set FLAME rotation and translation to zeros in the final exported output",
     )
-    parser.add_argument("--video_canvas_size", type=int, default=400, help="Canvas size for motion TransVAE raw-frame inference")
+    parser.add_argument("--video_canvas_size", type=int, default=300, help="Canvas size for motion TransVAE raw-frame inference")
     parser.add_argument("--motion_diffusion_n_heads", type=int, default=8, help="Motion diffusion attention head count used when reconstructing the model for inference")
     parser.add_argument("--motion_diffusion_dropout", type=float, default=0.1, help="Motion diffusion dropout used when reconstructing the model for inference")
     parser.add_argument("--motion_diffusion_train_timesteps", type=int, default=1000, help="Motion diffusion training schedule length used when reconstructing the sampler")
@@ -913,7 +938,13 @@ def main():
     # Optional temporal smoothing on predicted params
     if args.smooth > 0:
         for key in FLAME_KEYS:
-            results[key] = uniform_filter1d(results[key], size=args.smooth, axis=0)
+            results[key] = uniform_filter1d(results[key], size=args.smooth, axis=0, mode="nearest")
+
+    _stabilize_pose_tracks(
+        results,
+        noise_window=args.pose_noise_filter,
+        smooth_window=args.pose_smooth,
+    )
 
     # Copy non-predicted keys (shape, canonical_*) from labels
     for k in label_npz.keys():
