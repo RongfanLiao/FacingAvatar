@@ -9,14 +9,15 @@ This document defines a minimal but strong benchmark for evaluating reaction hea
 3. Does the reaction preserve the right temporal behavior beyond framewise error?
 4. Does the whole motion trajectory stay behaviorally close to the paired target?
 
-The recommended minimal benchmark contains the following six metrics:
+The recommended minimal benchmark contains the following seven metrics:
 
 1. MAE
 2. RMSE
-3. FID△fm
-4. SND
-5. frcorr_type
-6. frdist_type
+3. FD
+4. FID△fm
+5. SND
+6. frcorr_type
+7. frdist_type
 
 ## 2. Why These Metrics Form a Strong Minimal Set
 
@@ -26,6 +27,7 @@ This benchmark is intentionally small, but each metric covers a different failur
 |---|---|---|
 | MAE | Is the predicted FLAME motion close to the paired target? | Motion accuracy |
 | RMSE | Are there large motion errors or unstable failures? | Motion robustness |
+| FD | Does the overall frame-level FLAME distribution match real data? | Distribution realism |
 | FID△fm | Are frame-to-frame motion changes realistic? | Temporal realism |
 | SND | Does the overall motion sequence look natural? | Sequence realism |
 | frcorr_type | Does the predicted motion trajectory match any appropriate reaction trajectory for the same content type and reaction type? | Reaction appropriateness |
@@ -115,7 +117,46 @@ Like MAE, it can be reported overall and per parameter group.
 1. Temporal naturalness by itself
 2. Whether the reaction is semantically appropriate
 
-### 3.3 FID△fm
+### 3.3 FD
+
+#### What it is
+
+FD is a Frechet distance computed directly on frame-level FLAME parameter vectors over the evaluation split.
+
+#### How it is computed
+
+For all valid predicted and target frames in the evaluation split:
+
+1. Collect the predicted FLAME vectors.
+2. Collect the ground-truth FLAME vectors.
+3. Estimate mean and covariance for each set.
+4. Compute a Frechet distance between the two Gaussian summaries.
+
+Conceptually:
+
+$$
+   ext{FD} = ||\mu_p - \mu_g||_2^2 + \operatorname{Tr}(\Sigma_p + \Sigma_g - 2(\Sigma_p \Sigma_g)^{1/2})
+$$
+
+#### Why it is suitable
+
+1. It adds a dataset-level distribution check in the native FLAME space.
+2. It complements MAE and RMSE by measuring global realism instead of paired error.
+3. It is simpler than trajectory-aware metrics and useful as a sanity check for collapse or oversmoothing.
+
+#### What it captures well
+
+1. Frame-level distribution alignment
+2. Global bias or variance mismatch in predicted motion
+3. Overly narrow or overly dispersed prediction distributions
+
+#### What it does not capture well
+
+1. Temporal consistency
+2. Sequence-level naturalness
+3. Timing-aware appropriateness
+
+### 3.4 FID△fm
 
 #### What it is
 
@@ -160,7 +201,7 @@ where $(\mu_p, \Sigma_p)$ and $(\mu_g, \Sigma_g)$ are the mean and covariance of
 1. Exact framewise pairing
 2. Semantic appropriateness by itself
 
-### 3.4 SND
+### 3.5 SND
 
 #### What it is
 
@@ -193,7 +234,7 @@ In practice for this repo, the important point is to compute SND over full FLAME
 1. Fine-grained semantic fit to the content
 2. Visual rendering quality
 
-### 3.5 frcorr_type
+### 3.6 frcorr_type
 
 #### What it is
 
@@ -232,7 +273,7 @@ $$
 1. Distribution-level realism across the whole dataset
 2. Large local misalignments that could still preserve broad trend agreement
 
-### 3.6 frdist_type
+### 3.7 frdist_type
 
 #### What it is
 
@@ -281,6 +322,7 @@ The minimal benchmark follows exactly this logic:
 | Evaluation Need | Metric That Covers It |
 |---|---|
 | Paired motion correctness | MAE, RMSE |
+| Frame-level distribution realism | FD |
 | Temporal naturalness | FID△fm, SND |
 | Reaction appropriateness | frcorr_type, frdist_type |
 

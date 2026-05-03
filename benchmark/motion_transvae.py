@@ -784,6 +784,8 @@ def evaluate_motion_metrics(
 
     abs_errors = []
     sq_errors = []
+    frame_pred = []
+    frame_target = []
     delta_pred = []
     delta_target = []
     seq_desc_pred = []
@@ -846,6 +848,8 @@ def evaluate_motion_metrics(
             diff = pred_seq - target_seq
             abs_errors.append(np.abs(diff))
             sq_errors.append(diff ** 2)
+            frame_pred.append(pred_seq)
+            frame_target.append(target_seq)
 
             content_type, dominant = _annotation_bucket_key(seq_id, reaction_annotations_dir)
             if content_type is not None and dominant is not None:
@@ -899,6 +903,8 @@ def evaluate_motion_metrics(
 
     abs_errors_arr = _stack_valid_sequences(abs_errors, feature_dim=feature_dim)
     sq_errors_arr = _stack_valid_sequences(sq_errors, feature_dim=feature_dim)
+    frame_pred_arr = _stack_valid_sequences(frame_pred, feature_dim=feature_dim)
+    frame_target_arr = _stack_valid_sequences(frame_target, feature_dim=feature_dim)
     delta_pred_arr = _stack_valid_sequences(delta_pred, feature_dim=feature_dim)
     delta_target_arr = _stack_valid_sequences(delta_target, feature_dim=feature_dim)
 
@@ -908,6 +914,7 @@ def evaluate_motion_metrics(
     metrics = {
         "mae": float(abs_errors_arr.mean()),
         "rmse": float(np.sqrt(sq_errors_arr.mean())),
+        "fd": _frechet_distance(frame_pred_arr, frame_target_arr),
         "frcorr_type": float(np.mean(frcorr_type_list)) if frcorr_type_list else float("nan"),
         "frdist_type": float(np.mean(frdist_type_list)) if frdist_type_list else float("nan"),
         "frcorr": float(np.mean(frcorr_type_list)) if frcorr_type_list else float("nan"),
