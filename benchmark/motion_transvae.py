@@ -6,6 +6,7 @@ import math
 import os
 import time
 import json
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +18,9 @@ import torch.nn as nn
 
 from benchmark.targets import FLAME_118_DIM, FLAME_CONTENT_DIM, flame_component_layout, flame_npz_to_targets, flame_target_key, flame_target_variant
 from config import REACTION_ANNOTATIONS_DIR, VIDEO_CANVAS_SIZE, WAV2VEC_DIM
+
+
+TYPE_METRIC_CACHE_VERSION = "cheap-dtw-frdist-v1"
 
 
 def lengths_to_mask(lengths: torch.Tensor, max_len: int | None = None) -> torch.Tensor:
@@ -669,6 +673,79 @@ def _content_frd(pred_seq: np.ndarray, target_seq: np.ndarray) -> float:
     return float(total)
 
 
+def _windowed_dtw_distance(sequence_a: np.ndarray, sequence_b: np.ndarray, window_radius: int) -> float:
+    """DTW with Sakoe-Chiba band constraint for cheaper approximate matching."""
+    len_a, len_b = sequence_a.shape[0], sequence_b.shape[0]
+    window_radius = max(int(window_radius), abs(len_a - len_b))
+    dp = np.full((len_a + 1, len_b + 1), np.inf, dtype=np.float64)
+    dp[0, 0] = 0.0
+
+    for index_a in range(1, len_a + 1):
+        start_b = max(1, index_a - window_radius)
+        end_b = min(len_b, index_a + window_radius) + 1
+        for index_b in range(start_b, end_b):
+            cost = np.linalg.norm(sequence_a[index_a - 1] - sequence_b[index_b - 1])
+            dp[index_a, index_b] = cost + min(
+                dp[index_a - 1, index_b],
+                dp[index_a, index_b - 1],
+                dp[index_a - 1, index_b - 1],
+            )
+
+    return float(dp[len_a, len_b])
+
+
+def _cheap_dtw_frd_against_resampled_references(
+    pred_seq: np.ndarray,
+    references: np.ndarray,
+    feature_dim: int,
+    max_frames: int = 96,
+    window_ratio: float = 0.1,
+) -> float:
+    """Cheaper FRD approximation using downsampled, windowed DTW.
+
+    This keeps the DTW-style accumulated path cost, but computes it on temporally
+    downsampled sequences with a Sakoe-Chiba band to preserve scale better than
+    simple frame-aligned averaging.
+    """
+    if references.size == 0:
+        return float("nan")
+
+    pred = np.asarray(pred_seq, dtype=np.float32)
+    refs = np.asarray(references, dtype=np.float32)
+    if pred.ndim != 2 or refs.ndim != 3:
+        raise ValueError(f"Expected pred (T, D) and refs (N, T, D), got {pred.shape} and {refs.shape}")
+    if refs.shape[1] != pred.shape[0] or refs.shape[2] != pred.shape[1] or pred.shape[1] != feature_dim:
+        raise ValueError(
+            f"Expected refs (N, {pred.shape[0]}, {feature_dim}) and pred (*, {feature_dim}), got {refs.shape} and {pred.shape}"
+        )
+
+    approx_length = min(pred.shape[0], max_frames)
+    pred_down = _resample_sequence_length(pred, approx_length) if pred.shape[0] != approx_length else pred
+    refs_down = np.stack([
+        _resample_sequence_length(reference_seq, approx_length)
+        if reference_seq.shape[0] != approx_length else reference_seq
+        for reference_seq in refs
+    ]).astype(np.float32, copy=False)
+
+    window_radius = max(int(np.ceil(approx_length * window_ratio)), 2)
+    path_scale = pred.shape[0] / float(approx_length)
+    best_total = float("inf")
+
+    for reference_down in refs_down:
+        total = 0.0
+        for _, component_slice in flame_component_layout(feature_dim):
+            component_cost = _windowed_dtw_distance(
+                pred_down[:, component_slice],
+                reference_down[:, component_slice],
+                window_radius=window_radius,
+            )
+            total += path_scale * component_cost / float(component_slice.stop - component_slice.start)
+        if total < best_total:
+            best_total = total
+
+    return float(best_total)
+
+
 def _stack_valid_sequences(items: Iterable[np.ndarray], feature_dim: int) -> np.ndarray:
     arrays = [item for item in items if item.size > 0]
     if not arrays:
@@ -766,6 +843,492 @@ def _build_appropriate_reference_sets(
     return grouped, stats
 
 
+def _get_resampled_references(
+    bucket_key: tuple[str, str],
+    references: list[np.ndarray],
+    target_length: int,
+    cache: dict[tuple[str, str, int], np.ndarray],
+) -> np.ndarray:
+    cache_key = (bucket_key[0], bucket_key[1], int(target_length))
+    cached = cache.get(cache_key)
+    if cached is None:
+        cached = np.stack([
+            _resample_sequence_length(reference_seq, target_length)
+            for reference_seq in references
+        ]).astype(np.float32, copy=False)
+        cache[cache_key] = cached
+    return cached
+
+
+def _max_concordance_correlation_coefficient_against_references(
+    y_pred: np.ndarray,
+    references: np.ndarray,
+) -> float:
+    """Compute the best CCC against a bank of references with a vectorized implementation."""
+    if references.size == 0:
+        return float("nan")
+
+    pred = np.asarray(y_pred, dtype=np.float64)
+    refs = np.asarray(references, dtype=np.float64)
+    if pred.ndim == 1:
+        pred = pred[:, None]
+    if refs.ndim == 2:
+        refs = refs[:, :, None]
+
+    if pred.shape[0] != refs.shape[1] or pred.shape[1] != refs.shape[2]:
+        raise ValueError(
+            f"Expected references with shape (N, {pred.shape[0]}, {pred.shape[1]}), got {refs.shape}"
+        )
+
+    pred_mean = pred.mean(axis=0)
+    ref_mean = refs.mean(axis=1)
+    pred_centered = pred - pred_mean
+    ref_centered = refs - ref_mean[:, None, :]
+
+    if pred.shape[0] > 1:
+        sample_cov = (ref_centered * pred_centered[None, :, :]).sum(axis=1) / float(pred.shape[0] - 1)
+        sample_var_ref = (ref_centered ** 2).sum(axis=1) / float(pred.shape[0] - 1)
+        sample_var_pred = (pred_centered ** 2).sum(axis=0) / float(pred.shape[0] - 1)
+        corr_denom = np.sqrt(sample_var_ref * sample_var_pred[None, :])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cor = np.divide(sample_cov, corr_denom, out=np.zeros_like(sample_cov), where=corr_denom != 0)
+        cor = np.clip(np.nan_to_num(cor), -1.0, 1.0)
+    else:
+        cor = np.zeros((refs.shape[0], pred.shape[1]), dtype=np.float64)
+
+    var_ref = np.mean(ref_centered ** 2, axis=1)
+    var_pred = np.mean(pred_centered ** 2, axis=0)
+    sd_ref = np.sqrt(var_ref)
+    sd_pred = np.sqrt(var_pred)
+
+    numerator = 2.0 * cor * sd_ref * sd_pred[None, :]
+    denominator = var_ref + var_pred[None, :] + (ref_mean - pred_mean[None, :]) ** 2
+    ccc = numerator / (denominator + 1e-8)
+    return float(np.mean(ccc, axis=1).max())
+
+
+def _type_metric_cache_path(predictions_dir: str) -> str:
+    return os.path.join(predictions_dir, "type_metric_cache.json")
+
+
+def _reference_signature(reference_seq_ids: list[str] | None, target_variant: str) -> str:
+    normalized_ids = sorted(reference_seq_ids or [])
+    payload = f"{target_variant}\n" + "\n".join(normalized_ids)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _load_type_metric_cache(
+    predictions_dir: str,
+    target_variant: str,
+    reaction_annotations_dir: str,
+    reference_seq_ids: list[str] | None,
+) -> dict[str, dict[str, object]]:
+    cache_path = _type_metric_cache_path(predictions_dir)
+    if not os.path.exists(cache_path):
+        return {}
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+    meta = payload.get("meta")
+    entries = payload.get("entries")
+    if not isinstance(meta, dict) or not isinstance(entries, dict):
+        return {}
+
+    if meta.get("target_variant") != target_variant:
+        return {}
+    if meta.get("reaction_annotations_dir") != reaction_annotations_dir:
+        return {}
+    if meta.get("cache_version") != TYPE_METRIC_CACHE_VERSION:
+        return {}
+    if meta.get("reference_signature") != _reference_signature(reference_seq_ids, target_variant):
+        return {}
+
+    return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
+
+
+def _save_type_metric_cache(
+    predictions_dir: str,
+    target_variant: str,
+    reaction_annotations_dir: str,
+    reference_seq_ids: list[str] | None,
+    entries: dict[str, dict[str, object]],
+) -> None:
+    cache_path = _type_metric_cache_path(predictions_dir)
+    payload = {
+        "meta": {
+            "target_variant": target_variant,
+            "reaction_annotations_dir": reaction_annotations_dir,
+            "cache_version": TYPE_METRIC_CACHE_VERSION,
+            "reference_signature": _reference_signature(reference_seq_ids, target_variant),
+        },
+        "entries": entries,
+    }
+    with open(cache_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def _prediction_signature(prediction_path: str) -> str:
+    stat = os.stat(prediction_path)
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _compute_type_metrics_for_sequence(
+    seq_id: str,
+    pred_seq: np.ndarray,
+    appropriate_reference_sets: dict[tuple[str, str], list[np.ndarray]],
+    feature_dim: int,
+    reaction_annotations_dir: str,
+    resampled_reference_cache: dict[tuple[str, str, int], np.ndarray],
+) -> tuple[int, int, float | None, float | None]:
+    content_type, dominant = _annotation_bucket_key(seq_id, reaction_annotations_dir)
+    if content_type is None or dominant is None:
+        return 0, 0, None, None
+
+    references = appropriate_reference_sets.get((content_type, dominant), [])
+    if not references:
+        return 1, 0, None, None
+
+    bucket_key = (content_type, dominant)
+    resampled_references = _get_resampled_references(
+        bucket_key,
+        references,
+        pred_seq.shape[0],
+        resampled_reference_cache,
+    )
+    frcorr = _max_concordance_correlation_coefficient_against_references(pred_seq, resampled_references)
+    frdist = _cheap_dtw_frd_against_resampled_references(pred_seq, resampled_references, feature_dim=feature_dim)
+    return 1, 1, frcorr, frdist
+
+
+def _resolve_metric_target_config(
+    target_variant: str,
+) -> tuple[str, int, callable[[np.ndarray, np.ndarray], float]]:
+    if target_variant == "full":
+        return "flame_target_118", FLAME_118_DIM, _motion_frd
+    if target_variant == "content":
+        return "flame_target_content", FLAME_CONTENT_DIM, _content_frd
+    raise ValueError(f"Unsupported target variant: {target_variant}")
+
+
+@torch.no_grad()
+def save_motion_predictions(
+    model,
+    loader,
+    device,
+    output_dir: str,
+    use_amp: bool = False,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    model.eval()
+    os.makedirs(output_dir, exist_ok=True)
+
+    saved_sequences = 0
+    saved_frames = 0
+    reused_sequences = 0
+    reused_frames = 0
+    total_batches = len(loader)
+    eval_start_time = time.perf_counter()
+
+    for batch_idx, batch in enumerate(loader, start=1):
+        sequence_ids = [str(seq_id) for seq_id in batch["seq_ids"]]
+        output_paths = [os.path.join(output_dir, f"{seq_id}.npz") for seq_id in sequence_ids]
+        lengths_cpu = [int(length) for length in batch["lengths"].tolist()]
+        existing_mask = [os.path.exists(output_path) for output_path in output_paths]
+
+        if all(existing_mask):
+            reused_sequences += len(sequence_ids)
+            reused_frames += sum(lengths_cpu)
+            if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+                prefix = _format_progress_prefix(
+                    label=f"{eval_label}-predict",
+                    batch_idx=batch_idx,
+                    total_batches=total_batches,
+                    start_time=eval_start_time,
+                )
+                print(
+                    f"{prefix} | saved_sequences={saved_sequences} reused_sequences={reused_sequences} "
+                    f"saved_frames={saved_frames} reused_frames={reused_frames}",
+                    flush=True,
+                )
+            continue
+
+        left_audio = batch["left_audio_feat"].to(device)
+        left_video = batch.get("left_video_frames", batch.get("left_video_feat")).to(device)
+        lengths = batch["lengths"].to(device)
+        padding_mask = batch["padding_mask"].to(device)
+
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            prediction, _ = model(left_audio, left_video, lengths=lengths, padding_mask=padding_mask)
+
+        for sample_idx, length in enumerate(lengths.tolist()):
+            seq_id = sequence_ids[sample_idx]
+            pred_seq = prediction[sample_idx, :length].detach().cpu().numpy().astype(np.float32)
+            output_path = output_paths[sample_idx]
+            if existing_mask[sample_idx]:
+                reused_sequences += 1
+                reused_frames += int(length)
+                continue
+            np.savez_compressed(output_path, seq_id=seq_id, prediction=pred_seq)
+            saved_sequences += 1
+            saved_frames += int(length)
+
+        if log_interval > 0 and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == total_batches):
+            prefix = _format_progress_prefix(
+                label=f"{eval_label}-predict",
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                start_time=eval_start_time,
+            )
+            print(
+                f"{prefix} | saved_sequences={saved_sequences} reused_sequences={reused_sequences} "
+                f"saved_frames={saved_frames} reused_frames={reused_frames}",
+                flush=True,
+            )
+
+    return {
+        "prediction_cache_sequences": float(saved_sequences),
+        "prediction_cache_frames": float(saved_frames),
+        "prediction_cache_reused_sequences": float(reused_sequences),
+        "prediction_cache_reused_frames": float(reused_frames),
+    }
+
+
+def evaluate_saved_motion_metrics(
+    predictions_dir: str,
+    seq_ids: list[str],
+    manifest: dict[str, dict[str, str]],
+    target_variant: str = "full",
+    reference_seq_ids: list[str] | None = None,
+    eval_label: str = "val",
+    log_interval: int = 1,
+    reaction_annotations_dir: str = REACTION_ANNOTATIONS_DIR,
+) -> dict[str, float]:
+    target_key, feature_dim, _ = _resolve_metric_target_config(target_variant)
+
+    abs_errors = []
+    sq_errors = []
+    frame_pred = []
+    frame_target = []
+    delta_pred = []
+    delta_target = []
+    seq_desc_pred = []
+    seq_desc_target = []
+    frcorr_type_list = []
+    frdist_type_list = []
+    evaluated_sequences = 0
+    evaluated_frames = 0
+    type_metric_candidates = 0
+    type_metric_evaluated = 0
+    type_metric_cache_hits = 0
+    type_metric_cache_misses = 0
+
+    appropriate_reference_sets: dict[tuple[str, str], list[np.ndarray]] = {}
+    reference_stats = {
+        "reference_candidates": 0,
+        "reference_with_annotations": 0,
+        "reference_with_bucket": 0,
+        "reference_sequences_loaded": 0,
+    }
+    if reference_seq_ids:
+        appropriate_reference_sets, reference_stats = _build_appropriate_reference_sets(
+            reference_seq_ids=reference_seq_ids,
+            manifest=manifest,
+            target_key=target_key,
+            annotations_dir=reaction_annotations_dir,
+        )
+
+    type_metric_cache = _load_type_metric_cache(
+        predictions_dir=predictions_dir,
+        target_variant=target_variant,
+        reaction_annotations_dir=reaction_annotations_dir,
+        reference_seq_ids=reference_seq_ids,
+    )
+    type_metric_cache_dirty = False
+    resampled_reference_cache: dict[tuple[str, str, int], np.ndarray] = {}
+
+    missing_predictions: list[str] = []
+    total_sequences = len(seq_ids)
+    eval_start_time = time.perf_counter()
+
+    for sequence_idx, seq_id in enumerate(seq_ids, start=1):
+        prediction_path = os.path.join(predictions_dir, f"{seq_id}.npz")
+        if not os.path.exists(prediction_path):
+            missing_predictions.append(seq_id)
+            continue
+
+        entry = manifest.get(seq_id)
+        if entry is None:
+            raise RuntimeError(f"Missing manifest entry for sequence {seq_id!r}")
+        flame_npz = entry.get("flame_npz")
+        if not flame_npz or not os.path.exists(flame_npz):
+            raise RuntimeError(f"Missing FLAME target file for sequence {seq_id!r}")
+
+        with np.load(prediction_path) as npz:
+            pred_seq = np.asarray(npz["prediction"], dtype=np.float32)
+        target_seq = np.asarray(flame_npz_to_targets(flame_npz)[target_key], dtype=np.float32)
+
+        if pred_seq.ndim != 2 or pred_seq.shape[1] != feature_dim:
+            raise RuntimeError(
+                f"Cached prediction for {seq_id!r} has shape {pred_seq.shape}, expected (*, {feature_dim})"
+            )
+
+        if target_seq.ndim != 2 or target_seq.shape[1] != feature_dim:
+            raise RuntimeError(
+                f"Target sequence for {seq_id!r} has shape {target_seq.shape}, expected (*, {feature_dim})"
+            )
+
+        if pred_seq.shape[0] != target_seq.shape[0]:
+            shared_length = min(pred_seq.shape[0], target_seq.shape[0])
+            pred_seq = pred_seq[:shared_length]
+            target_seq = target_seq[:shared_length]
+
+        if pred_seq.size == 0:
+            continue
+
+        diff = pred_seq - target_seq
+        abs_errors.append(np.abs(diff))
+        sq_errors.append(diff ** 2)
+        frame_pred.append(pred_seq)
+        frame_target.append(target_seq)
+
+        prediction_sig = _prediction_signature(prediction_path)
+        cached_metrics = type_metric_cache.get(seq_id)
+        if (
+            isinstance(cached_metrics, dict)
+            and cached_metrics.get("prediction_signature") == prediction_sig
+            and cached_metrics.get("sequence_length") == int(pred_seq.shape[0])
+        ):
+            candidates = int(cached_metrics.get("type_metric_candidates", 0))
+            evaluated = int(cached_metrics.get("type_metric_evaluated", 0))
+            frcorr_value = cached_metrics.get("frcorr_type")
+            frdist_value = cached_metrics.get("frdist_type")
+            type_metric_cache_hits += 1
+        else:
+            candidates, evaluated, frcorr_value, frdist_value = _compute_type_metrics_for_sequence(
+                seq_id=seq_id,
+                pred_seq=pred_seq,
+                appropriate_reference_sets=appropriate_reference_sets,
+                feature_dim=feature_dim,
+                reaction_annotations_dir=reaction_annotations_dir,
+                resampled_reference_cache=resampled_reference_cache,
+            )
+            type_metric_cache[seq_id] = {
+                "prediction_signature": prediction_sig,
+                "sequence_length": int(pred_seq.shape[0]),
+                "type_metric_candidates": candidates,
+                "type_metric_evaluated": evaluated,
+                "frcorr_type": frcorr_value,
+                "frdist_type": frdist_value,
+            }
+            type_metric_cache_dirty = True
+            type_metric_cache_misses += 1
+
+        type_metric_candidates += candidates
+        type_metric_evaluated += evaluated
+        if evaluated:
+            frcorr_type_list.append(float(frcorr_value))
+            frdist_type_list.append(float(frdist_value))
+
+        pred_delta = np.diff(pred_seq, axis=0)
+        target_delta_seq = np.diff(target_seq, axis=0)
+        if pred_delta.size > 0 and target_delta_seq.size > 0:
+            delta_pred.append(pred_delta)
+            delta_target.append(target_delta_seq)
+
+        pred_desc = np.concatenate([
+            pred_seq.mean(axis=0),
+            pred_seq.std(axis=0),
+            pred_delta.mean(axis=0) if pred_delta.size > 0 else np.zeros(pred_seq.shape[1], dtype=np.float32),
+            pred_delta.std(axis=0) if pred_delta.size > 0 else np.zeros(pred_seq.shape[1], dtype=np.float32),
+        ])
+        target_desc = np.concatenate([
+            target_seq.mean(axis=0),
+            target_seq.std(axis=0),
+            target_delta_seq.mean(axis=0) if target_delta_seq.size > 0 else np.zeros(target_seq.shape[1], dtype=np.float32),
+            target_delta_seq.std(axis=0) if target_delta_seq.size > 0 else np.zeros(target_seq.shape[1], dtype=np.float32),
+        ])
+        seq_desc_pred.append(pred_desc.astype(np.float32))
+        seq_desc_target.append(target_desc.astype(np.float32))
+        evaluated_sequences += 1
+        evaluated_frames += pred_seq.shape[0]
+
+        if log_interval > 0 and (sequence_idx == 1 or sequence_idx % log_interval == 0 or sequence_idx == total_sequences):
+            prefix = _format_progress_prefix(
+                label=f"{eval_label}-saved-metrics",
+                batch_idx=sequence_idx,
+                total_batches=total_sequences,
+                start_time=eval_start_time,
+            )
+            print(f"{prefix} | sequences={evaluated_sequences} frames={evaluated_frames}", flush=True)
+
+    if missing_predictions:
+        preview = ", ".join(missing_predictions[:5])
+        suffix = "" if len(missing_predictions) <= 5 else ", ..."
+        raise RuntimeError(
+            f"Missing cached predictions for {len(missing_predictions)} sequences in {predictions_dir}: {preview}{suffix}"
+        )
+
+    if type_metric_cache_dirty:
+        _save_type_metric_cache(
+            predictions_dir=predictions_dir,
+            target_variant=target_variant,
+            reaction_annotations_dir=reaction_annotations_dir,
+            reference_seq_ids=reference_seq_ids,
+            entries=type_metric_cache,
+        )
+
+    abs_errors_arr = _stack_valid_sequences(abs_errors, feature_dim=feature_dim)
+    sq_errors_arr = _stack_valid_sequences(sq_errors, feature_dim=feature_dim)
+    frame_pred_arr = _stack_valid_sequences(frame_pred, feature_dim=feature_dim)
+    frame_target_arr = _stack_valid_sequences(frame_target, feature_dim=feature_dim)
+    delta_pred_arr = _stack_valid_sequences(delta_pred, feature_dim=feature_dim)
+    delta_target_arr = _stack_valid_sequences(delta_target, feature_dim=feature_dim)
+
+    if abs_errors_arr.shape[0] == 0:
+        raise RuntimeError("No valid sequences available for metric computation")
+
+    metrics = {
+        "mae": float(abs_errors_arr.mean()),
+        "rmse": float(np.sqrt(sq_errors_arr.mean())),
+        "fd": _frechet_distance(frame_pred_arr, frame_target_arr),
+        "frcorr_type": float(np.mean(frcorr_type_list)) if frcorr_type_list else float("nan"),
+        "frdist_type": float(np.mean(frdist_type_list)) if frdist_type_list else float("nan"),
+        "frcorr": float(np.mean(frcorr_type_list)) if frcorr_type_list else float("nan"),
+        "frdist": float(np.mean(frdist_type_list)) if frdist_type_list else float("nan"),
+    }
+    metrics.update(reference_stats)
+    metrics["appropriate_set_count"] = float(len(appropriate_reference_sets))
+    metrics["type_metric_candidates"] = float(type_metric_candidates)
+    metrics["type_metric_evaluated"] = float(type_metric_evaluated)
+    metrics["type_metric_cache_hits"] = float(type_metric_cache_hits)
+    metrics["type_metric_cache_misses"] = float(type_metric_cache_misses)
+
+    for name, component_slice in flame_component_layout(feature_dim):
+        metrics[f"mae_{name}"] = float(abs_errors_arr[:, component_slice].mean())
+        metrics[f"rmse_{name}"] = float(np.sqrt(sq_errors_arr[:, component_slice].mean()))
+
+    if delta_pred_arr.shape[0] > 0 and delta_target_arr.shape[0] > 0:
+        metrics["fid_delta_fm"] = _frechet_distance(delta_pred_arr, delta_target_arr)
+    else:
+        metrics["delta_mae"] = float("nan")
+        metrics["delta_rmse"] = float("nan")
+        metrics["fid_delta_fm"] = float("nan")
+
+    if seq_desc_pred and seq_desc_target:
+        metrics["snd"] = _frechet_distance(np.stack(seq_desc_pred), np.stack(seq_desc_target))
+    else:
+        metrics["snd"] = float("nan")
+
+    return metrics
+
+
 @torch.no_grad()
 def evaluate_motion_metrics(
     model,
@@ -796,17 +1359,9 @@ def evaluate_motion_metrics(
     evaluated_frames = 0
     type_metric_candidates = 0
     type_metric_evaluated = 0
+    resampled_reference_cache: dict[tuple[str, str, int], np.ndarray] = {}
 
-    if target_variant == "full":
-        target_key = "flame_target_118"
-        feature_dim = FLAME_118_DIM
-        frd_func = _motion_frd
-    elif target_variant == "content":
-        target_key = "flame_target_content"
-        feature_dim = FLAME_CONTENT_DIM
-        frd_func = _content_frd
-    else:
-        raise ValueError(f"Unsupported target variant: {target_variant}")
+    target_key, feature_dim, _ = _resolve_metric_target_config(target_variant)
 
     appropriate_reference_sets: dict[tuple[str, str], list[np.ndarray]] = {}
     reference_stats = {
@@ -851,23 +1406,19 @@ def evaluate_motion_metrics(
             frame_pred.append(pred_seq)
             frame_target.append(target_seq)
 
-            content_type, dominant = _annotation_bucket_key(seq_id, reaction_annotations_dir)
-            if content_type is not None and dominant is not None:
-                type_metric_candidates += 1
-                references = appropriate_reference_sets.get((content_type, dominant), [])
-                if references:
-                    frcorr_type_list.append(max(
-                        _concordance_correlation_coefficient(
-                            _resample_sequence_length(reference_seq, pred_seq.shape[0]),
-                            pred_seq,
-                        )
-                        for reference_seq in references
-                    ))
-                    frdist_type_list.append(min(
-                        frd_func(pred_seq, reference_seq)
-                        for reference_seq in references
-                    ))
-                    type_metric_evaluated += 1
+            candidates, evaluated, frcorr_value, frdist_value = _compute_type_metrics_for_sequence(
+                seq_id=seq_id,
+                pred_seq=pred_seq,
+                appropriate_reference_sets=appropriate_reference_sets,
+                feature_dim=feature_dim,
+                reaction_annotations_dir=reaction_annotations_dir,
+                resampled_reference_cache=resampled_reference_cache,
+            )
+            type_metric_candidates += candidates
+            type_metric_evaluated += evaluated
+            if evaluated:
+                frcorr_type_list.append(float(frcorr_value))
+                frdist_type_list.append(float(frdist_value))
 
             pred_delta = np.diff(pred_seq, axis=0)
             target_delta_seq = np.diff(target_seq, axis=0)

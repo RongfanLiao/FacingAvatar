@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the Dyadic ContinuousTransformer port")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--feature_dim", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--video_canvas_size", type=int, default=VIDEO_CANVAS_SIZE)
     parser.add_argument("--max_sequences", type=int, default=0)
-    parser.add_argument("--predefined_splits_dir", type=str, default=None,
+    parser.add_argument("--predefined_splits_dir", type=str, default="data/LookingFace/dataset_splits",
                         help="Path to directory with train.json/valid.json/test.json predefined splits")
     parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
     parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")

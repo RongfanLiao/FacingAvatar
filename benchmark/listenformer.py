@@ -17,7 +17,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 
-from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics
+from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics, save_motion_predictions
 from benchmark.targets import FLAME_118_DIM, flame_component_layout, flame_target_variant
 from config import WAV2VEC_DIM
 
@@ -389,6 +389,43 @@ def validate_listenformer(
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
 
+class _ListenFormerWrapper(nn.Module):
+    def __init__(self, inner: LookingFaceListenFormer):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, left_audio_feat, left_video_feat, lengths, padding_mask=None):
+        prediction, _ = self.inner(
+            left_audio_feat=left_audio_feat,
+            left_video_frames=left_video_feat,
+            lengths=lengths,
+            padding_mask=padding_mask,
+            target=None,
+        )
+        return prediction, None
+
+
+@torch.no_grad()
+def save_listenformer_predictions(
+    model: LookingFaceListenFormer,
+    loader,
+    device: torch.device,
+    output_dir: str,
+    use_amp: bool = False,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    return save_motion_predictions(
+        _ListenFormerWrapper(model),
+        loader,
+        device=device,
+        output_dir=output_dir,
+        use_amp=use_amp,
+        eval_label=eval_label,
+        log_interval=log_interval,
+    )
+
+
 @torch.no_grad()
 def evaluate_listenformer_metrics(
     model: LookingFaceListenFormer,
@@ -399,21 +436,6 @@ def evaluate_listenformer_metrics(
     manifest: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, float]:
     """Evaluate the ListenFormer port with the shared motion metrics stack."""
-
-    class _ListenFormerWrapper(nn.Module):
-        def __init__(self, inner: LookingFaceListenFormer):
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, left_audio_feat, left_video_feat, lengths, padding_mask=None):
-            prediction, _ = self.inner(
-                left_audio_feat=left_audio_feat,
-                left_video_frames=left_video_feat,
-                lengths=lengths,
-                padding_mask=padding_mask,
-                target=None,
-            )
-            return prediction, None
 
     return evaluate_motion_metrics(
         _ListenFormerWrapper(model),
