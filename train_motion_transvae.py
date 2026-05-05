@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--div_p", type=float, default=10.0)
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
-    parser.add_argument("--checkpoint_dir", default="work_dir/checkpoints/motion_transvae")
+    parser.add_argument("--checkpoint_dir", default="checkpoints/motion_transvae")
     parser.add_argument("--split_path", default=default_benchmark_split_path())
     parser.add_argument("--train_val_same", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
