@@ -36,9 +36,9 @@ from manifest import load_manifest
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the LookingFace REGNN benchmark port")
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--val_period", type=int, default=2)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--fused_dim", type=int, default=64)
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reconstruction_weight", type=float, default=0.0)
     parser.add_argument("--vel_weight", type=float, default=0.0)
     parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     parser.add_argument("--checkpoint_dir", default="checkpoints/regnn_port")
     parser.add_argument("--split_path", default=default_benchmark_split_path())
