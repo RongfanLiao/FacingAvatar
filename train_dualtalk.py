@@ -73,10 +73,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--predefined_splits_dir",
         type=str,
-        default=None,
+        default="data/LookingFace/dataset_splits",
         help="Path to directory with train.json/valid.json/test.json predefined splits",
     )
-    parser.add_argument("--val_interval", type=int, default=5, help="Validate every N epochs")
+    parser.add_argument("--val_interval", type=int, default=2, help="Validate every N epochs")
     parser.add_argument("--log_interval", type=int, default=1, help="Print per-iteration progress every N batches")
     parser.add_argument(
         "--resume_checkpoint",
