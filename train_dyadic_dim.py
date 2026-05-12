@@ -97,6 +97,7 @@ def main() -> None:
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     eval_label = "val"
     manifest = load_manifest()
+    reference_seq_ids: list[str] = []
 
     if args.predefined_splits_dir:
         splits = load_predefined_splits(
@@ -120,6 +121,7 @@ def main() -> None:
             require_wav2vec_audio=True,
             manifest=manifest,
         )
+    reference_seq_ids = list(train_seqs)
     if args.train_val_same:
         val_seqs = train_seqs
     if args.max_sequences > 0:
@@ -248,7 +250,7 @@ def main() -> None:
         val_loader,
         device=device,
         use_amp=use_amp,
-        reference_seq_ids=train_seqs,
+        reference_seq_ids=reference_seq_ids,
         manifest=manifest,
     )
     metric_results["target_variant"] = "content"

@@ -18,12 +18,13 @@ from benchmark.lookingface import (
 )
 from benchmark.motion_transvae import (
     checkpoint_state_dict,
+    evaluate_saved_motion_metrics,
     extract_checkpoint_metric,
-    evaluate_motion_metrics,
     load_checkpoint,
     MotionTransformerVAE,
     MotionVAELoss,
     resume_training_state,
+    save_motion_predictions,
     save_checkpoint,
     train_motion_transvae,
     validate_motion_transvae,
@@ -252,22 +253,39 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_metrics(
+    target_variant = flame_target_variant(output_dim)
+    checkpoint_source = args.resume_checkpoint if args.resume_checkpoint else best_path
+    checkpoint_tag = os.path.splitext(os.path.basename(checkpoint_source))[0]
+    prediction_cache_name = (
+        f"{eval_label}_predictions_{checkpoint_tag}_{args.max_eval_samples if args.max_eval_samples is not None else 'all'}"
+    )
+    prediction_cache_dir = os.path.join(args.checkpoint_dir, prediction_cache_name)
+    prediction_summary = save_motion_predictions(
         model,
         val_loader,
         device=device,
-        target_variant=flame_target_variant(output_dim),
         use_amp=use_amp,
-        reference_seq_ids=train_seqs,
-        manifest=manifest,
+        output_dir=prediction_cache_dir,
+        eval_label=eval_label,
+        log_interval=args.log_interval,
     )
-    metric_results["target_variant"] = flame_target_variant(output_dim)
-    # metric_results["evaluation_split"] = eval_label
-    # metric_results.update({
-    #     f"{eval_label}_{key}": value
-    #     for key, value in list(metric_results.items())
-    #     if key not in {"target_variant", "evaluation_split"}
-    # })
+    metric_results = evaluate_saved_motion_metrics(
+        predictions_dir=prediction_cache_dir,
+        seq_ids=val_seqs,
+        manifest=manifest,
+        target_variant=target_variant,
+        reference_seq_ids=train_seqs,
+        eval_label=eval_label,
+        log_interval=args.log_interval,
+    )
+    metric_results.update(prediction_summary)
+    metric_results["target_variant"] = target_variant
+    metric_results["evaluation_split"] = eval_label
+    metric_results.update({
+        f"{eval_label}_{key}": value
+        for key, value in list(metric_results.items())
+        if key not in {"target_variant", "evaluation_split"}
+    })
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     with open(metric_path, "w") as f:

@@ -19,7 +19,8 @@ from benchmark.lookingface import (
 from benchmark.motion_flow_matching import (
     FlowMatchingLoss,
     MotionFlowMatchingModel,
-    evaluate_motion_flow_matching_metrics,
+    evaluate_saved_motion_flow_matching_metrics,
+    save_motion_flow_matching_predictions,
     train_motion_flow_matching,
     validate_motion_flow_matching,
 )
@@ -143,6 +144,7 @@ def main() -> None:
     use_amp = bool(args.amp and device.type == "cuda")
     eval_label = "val"
     manifest = load_manifest()
+    reference_seq_ids: list[str] = []
 
     if args.predefined_splits_dir:
         splits = load_predefined_splits(
@@ -165,6 +167,8 @@ def main() -> None:
             require_wav2vec_audio=True,
             manifest=manifest,
         )
+
+    reference_seq_ids = list(train_seqs)
 
     if args.max_sequences > 0:
         train_seqs = train_seqs[: args.max_sequences]
@@ -314,21 +318,48 @@ def main() -> None:
         checkpoint = load_checkpoint(best_path, device)
         model.load_state_dict(checkpoint_state_dict(checkpoint))
 
-    metric_results = evaluate_motion_flow_matching_metrics(
+    if args.max_eval_samples is not None:
+        cache_scope = args.max_eval_samples
+    elif args.max_sequences > 0:
+        cache_scope = args.max_sequences
+    else:
+        cache_scope = "all"
+    checkpoint_source = args.resume_checkpoint if args.resume_checkpoint else best_path
+    checkpoint_tag = os.path.splitext(os.path.basename(checkpoint_source))[0]
+    prediction_cache_name = f"{eval_label}_predictions_{checkpoint_tag}_{cache_scope}"
+    prediction_cache_dir = os.path.join(args.checkpoint_dir, prediction_cache_name)
+    prediction_summary = save_motion_flow_matching_predictions(
         model,
         val_loader,
         device=device,
+        output_dir=prediction_cache_dir,
         use_amp=use_amp,
-        reference_seq_ids=train_seqs,
-        manifest=manifest,
+        eval_label=eval_label,
+        log_interval=args.log_interval,
     )
+    metric_results = evaluate_saved_motion_flow_matching_metrics(
+        predictions_dir=prediction_cache_dir,
+        seq_ids=val_seqs,
+        manifest=manifest,
+        model=model,
+        reference_seq_ids=reference_seq_ids,
+        eval_label=eval_label,
+        log_interval=args.log_interval,
+    )
+    metric_results.update(prediction_summary)
     metric_results["target_variant"] = flame_target_variant(model.target_dim)
+    metric_results["evaluation_split"] = eval_label
+    metric_results.update({
+        f"{eval_label}_{key}": value
+        for key, value in list(metric_results.items())
+        if key not in {"target_variant", "evaluation_split"}
+    })
     metric_path = os.path.join(args.checkpoint_dir, "metrics.json")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     with open(metric_path, "w") as f:
         json.dump(metric_results, f, indent=2)
 
-    print("Final validation metrics:")
+    print(f"Final {eval_label} metrics:")
     for key, value in metric_results.items():
         if isinstance(value, (int, float)):
             print(f"  {key}={value:.6f}")

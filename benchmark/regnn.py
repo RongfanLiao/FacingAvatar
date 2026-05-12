@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from benchmark.motion_transvae import BaselineSpeakerEncoder, evaluate_motion_metrics
+from benchmark.motion_transvae import BaselineSpeakerEncoder, evaluate_motion_metrics, evaluate_saved_motion_metrics, save_motion_predictions
 from benchmark.targets import FLAME_118_DIM, flame_component_layout, flame_target_key, flame_target_variant
 from config import WAV2VEC_DIM
 
@@ -672,6 +672,59 @@ def validate_regnn(
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
 
+class _REGNNWrapper(nn.Module):
+    def __init__(self, inner: LookingFaceREGNN):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, left_audio_feat, left_video_feat, lengths, padding_mask=None):
+        del padding_mask
+        prediction = self.inner.predict_sequence(left_audio_feat, left_video_feat, lengths)
+        return prediction, None
+
+
+@torch.no_grad()
+def save_regnn_predictions(
+    model: LookingFaceREGNN,
+    loader,
+    device: torch.device,
+    output_dir: str,
+    use_amp: bool = False,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    return save_motion_predictions(
+        _REGNNWrapper(model),
+        loader,
+        device=device,
+        output_dir=output_dir,
+        use_amp=use_amp,
+        eval_label=eval_label,
+        log_interval=log_interval,
+    )
+
+
+@torch.no_grad()
+def evaluate_saved_regnn_metrics(
+    predictions_dir: str,
+    seq_ids: list[str],
+    manifest: dict[str, dict[str, str]],
+    model: LookingFaceREGNN,
+    reference_seq_ids: list[str] | None = None,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    return evaluate_saved_motion_metrics(
+        predictions_dir=predictions_dir,
+        seq_ids=seq_ids,
+        manifest=manifest,
+        target_variant=flame_target_variant(model.target_dim),
+        reference_seq_ids=reference_seq_ids,
+        eval_label=eval_label,
+        log_interval=log_interval,
+    )
+
+
 @torch.no_grad()
 def evaluate_regnn_metrics(
     model: LookingFaceREGNN,
@@ -682,20 +735,11 @@ def evaluate_regnn_metrics(
 ) -> dict[str, float]:
     """Run shared motion metrics on full-sequence REGNN predictions."""
 
-    class _REGNNWrapper(nn.Module):
-        def __init__(self, inner: LookingFaceREGNN):
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, left_audio_feat, left_video_feat, lengths, padding_mask=None):
-            del padding_mask
-            prediction = self.inner.predict_sequence(left_audio_feat, left_video_feat, lengths)
-            return prediction, None
-
     return evaluate_motion_metrics(
         _REGNNWrapper(model),
         loader,
         device=device,
+        target_variant=flame_target_variant(model.target_dim),
         reference_seq_ids=reference_seq_ids,
         manifest=manifest,
     )

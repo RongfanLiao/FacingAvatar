@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics
+from benchmark.motion_transvae import PositionalEncoding, VideoEncoder, evaluate_motion_metrics, evaluate_saved_motion_metrics, save_motion_predictions
 from benchmark.targets import FLAME_118_DIM, flame_component_layout, flame_target_key, flame_target_variant
 from config import WAV2VEC_DIM
 
@@ -618,6 +618,58 @@ def validate_motion_diffusion(
     return {key: value / max(batches, 1) for key, value in totals.items()}
 
 
+class _MotionDiffusionSamplerWrapper(nn.Module):
+    def __init__(self, inner: MotionDiffusionModel):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, left_audio_feat, left_video_frames, lengths, padding_mask=None):
+        del lengths
+        return self.inner.sample(left_audio_feat, left_video_frames, padding_mask), None
+
+
+@torch.no_grad()
+def save_motion_diffusion_predictions(
+    model: MotionDiffusionModel,
+    loader,
+    device: torch.device,
+    output_dir: str,
+    use_amp: bool = False,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    return save_motion_predictions(
+        _MotionDiffusionSamplerWrapper(model),
+        loader,
+        device=device,
+        output_dir=output_dir,
+        use_amp=use_amp,
+        eval_label=eval_label,
+        log_interval=log_interval,
+    )
+
+
+@torch.no_grad()
+def evaluate_saved_motion_diffusion_metrics(
+    predictions_dir: str,
+    seq_ids: list[str],
+    manifest: dict[str, dict[str, str]],
+    model: MotionDiffusionModel,
+    reference_seq_ids: list[str] | None = None,
+    eval_label: str = "val",
+    log_interval: int = 1,
+) -> dict[str, float]:
+    return evaluate_saved_motion_metrics(
+        predictions_dir=predictions_dir,
+        seq_ids=seq_ids,
+        manifest=manifest,
+        target_variant=flame_target_variant(model.target_dim),
+        reference_seq_ids=reference_seq_ids,
+        eval_label=eval_label,
+        log_interval=log_interval,
+    )
+
+
 @torch.no_grad()
 def evaluate_motion_diffusion_metrics(
     model: MotionDiffusionModel,
@@ -628,17 +680,8 @@ def evaluate_motion_diffusion_metrics(
 ) -> dict[str, float]:
     """Run the shared benchmark metric stack on sampled diffusion outputs."""
 
-    class _SamplerWrapper(nn.Module):
-        def __init__(self, inner: MotionDiffusionModel):
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, left_audio_feat, left_video_frames, lengths, padding_mask=None):
-            del lengths
-            return self.inner.sample(left_audio_feat, left_video_frames, padding_mask), None
-
     return evaluate_motion_metrics(
-        _SamplerWrapper(model),
+        _MotionDiffusionSamplerWrapper(model),
         loader,
         device=device,
         target_variant=flame_target_variant(model.target_dim),
